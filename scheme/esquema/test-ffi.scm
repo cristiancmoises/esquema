@@ -1,20 +1,29 @@
+;;; test-ffi.scm — quick manual FFI smoke check.
+;;;
+;;; Honest, non-false-positive checks that are safe to run from the live
+;;; (multi-threaded) Guile process: it does NOT try to unshare a user
+;;; namespace here (that requires the single-threaded child that
+;;; esquema_spawn forks). For the full functional/security suite run
+;;;   make check
+;;; which exercises real isolation.
 (define-module (esquema test-ffi)
   #:use-module (esquema ffi)
+  #:use-module (esquema constants)
   #:use-module (ice-9 format))
 
-(format #t "Testing Esquema…~%")
+(define failures 0)
+(define (check name ok?)
+  (format #t "~a ~a~%" (if ok? "ok  " "FAIL") name)
+  (unless ok? (set! failures (+ failures 1))))
 
-(define CLONE_NEWNS  #x00020000)
-(define CLONE_NEWUTS #x04000000)
-(define CLONE_NEWNET #x40000000)
+(format #t "Esquema FFI smoke (version ~a)~%" (esquema-version))
 
-(define flags
-  (logior CLONE_NEWNS CLONE_NEWUTS CLONE_NEWNET))
+(check "esquema-init returns 42" (= 42 (esquema-init)))
+(check "esquema-version is a string" (string? (esquema-version)))
+(check "esquema-unshare rejects a disallowed flag (EINVAL)"
+       (= -1 (esquema-unshare #x00000100)))   ; CLONE_VM: not permitted
+(check "esquema-enter-cgroup rejects a traversal name"
+       (= -1 (esquema-enter-cgroup "../evil")))
 
-(format #t "Calling unshare…~%")
-(format #t "Result: ~a~%" (esquema-unshare flags))
-
-(format #t "Dropping privileges…~%")
-(format #t "Result: ~a~%" (esquema-drop-privs))
-
-(format #t "Done ✔~%")
+(format #t "~%~a check(s) failed~%" failures)
+(exit (if (zero? failures) 0 1))

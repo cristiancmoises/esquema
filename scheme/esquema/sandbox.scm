@@ -1,30 +1,87 @@
+;;; sandbox.scm — marshal a <container> into libesquema and run it.
+;;;
+;;; The security-critical fork/unshare/pivot/drop/seccomp/execve sequence all
+;;; happens inside libesquema's esquema_spawn (async-signal-safe C). Guile
+;;; never runs code between fork and execve, which is what makes confining an
+;;; untrusted payload from a multi-threaded interpreter safe.
 (define-module (esquema sandbox)
+  #:use-module (system foreign)
   #:use-module (esquema ffi)
-  #:export (with-sandbox))
+  #:use-module (esquema container)
+  #:use-module (esquema constants)
+  #:export (container->config
+            with-sandbox
+            spawn-container
+            sandbox-run))
 
-;; Linux namespace flags (from sched.h)
-(define CLONE_NEWNS   #x00020000)
-(define CLONE_NEWUSER #x10000000)
-(define CLONE_NEWPID  #x20000000)
+;;; Build a freshly-allocated esquema_config* from a <container>.
+;;; Caller owns the pointer and must esquema-config-free it. If any build
+;;; step throws (bad namespace symbol, non-string field, out-of-range limit),
+;;; the partially-built config is freed before the error propagates.
+(define (container->config c)
+  (let ((cfg (esquema-config-new)))
+    (when (eqv? cfg %null-pointer)
+      (error "esquema: config allocation failed"))
+    (catch #t
+      (lambda () (fill-config! cfg c) cfg)
+      (lambda (key . args)
+        (esquema-config-free cfg)
+        (apply throw key args)))))
 
-;; Execution order:
-;; 1. create user namespace (must be first)
-;; 2. create other namespaces
-;; 3. drop privileges
-;; 4. run payload
-(define (with-sandbox thunk)
-  ;; Phase 1: user namespace
-  (unless (= 0 (esquema-unshare CLONE_NEWUSER))
-    (error "unshare userns failed"))
+(define (fill-config! cfg c)
+    (esquema-config-set-rootfs cfg (container-rootfs c))
+    (when (container-hostname c)
+      (esquema-config-set-hostname cfg (container-hostname c)))
+    (for-each (lambda (a) (esquema-config-add-arg cfg a))
+              (container-command c))
+    (for-each (lambda (kv)
+                (esquema-config-add-env
+                 cfg (string-append (car kv) "=" (cdr kv))))
+              (container-env c))
+    (for-each (lambda (m)
+                (esquema-config-add-bind cfg (car m) (cadr m)
+                                         (and (pair? (cddr m)) (caddr m))))
+              (container-mounts c))
+    (esquema-config-set-namespaces
+     cfg (namespaces->mask (container-namespaces c)))
+    (let ((idm (container-id-map c)))
+      (when idm (esquema-config-set-id-map cfg (car idm) (cdr idm))))
+    (esquema-config-set-seccomp cfg (container-seccomp? c))
+    (esquema-config-set-drop-caps cfg (container-drop-caps? c))
+    (esquema-config-set-rootfs-ro cfg (container-rootfs-ro? c))
+    (let ((lim (container-limits c))
+          (cg  (container-cgroup-name c)))
+      (when (or lim cg)
+        (esquema-config-set-cgroup-name cfg (or cg (container-name c)))
+        (when lim
+          (when (limits-memory-max lim)
+            (esquema-config-set-memory-max cfg (limits-memory-max lim)))
+          (when (limits-pids-max lim)
+            (esquema-config-set-pids-max cfg (limits-pids-max lim)))
+          (when (and (limits-cpu-quota lim) (limits-cpu-period lim))
+            (esquema-config-set-cpu-max cfg (limits-cpu-quota lim)
+                                        (limits-cpu-period lim))))))
+    cfg)
 
-  ;; Phase 2: mount + pid namespaces
-  (unless (= 0 (esquema-unshare
-                (logior CLONE_NEWNS CLONE_NEWPID)))
-    (error "unshare mount/pid failed"))
+;;; Spawn a container and return its child pid (or raise on failure).
+(define (spawn-container c)
+  (let ((cfg (container->config c)))
+    (dynamic-wind
+      (lambda () #t)
+      (lambda ()
+        (let ((pid (esquema-spawn cfg)))
+          (when (< pid 0)
+            (error "esquema-spawn failed" (esquema-strerror)))
+          pid))
+      (lambda () (esquema-config-free cfg)))))
 
-  ;; Phase 3: drop privileges
-  (unless (= 0 (esquema-drop-privs))
-    (error "drop-privs failed"))
+;;; Run a container to completion; return its exit status.
+(define (with-sandbox c)
+  (let ((pid (spawn-container c)))
+    (let ((rc (esquema-wait pid)))
+      (when (< rc 0)
+        (error "esquema-wait failed" (esquema-strerror)))
+      rc)))
 
-  ;; Phase 4: execute payload
-  (thunk))
+;;; Alias kept for readability in scripts.
+(define (sandbox-run c) (with-sandbox c))

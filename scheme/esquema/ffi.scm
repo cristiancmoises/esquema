@@ -1,29 +1,139 @@
+;;; ffi.scm — bindings to libesquema.so.
+;;;
+;;; Library resolution is deliberately NOT relative to the current working
+;;; directory (dlopen of a writable ./libesquema.so is a code-execution
+;;; vector). We look at $ESQUEMA_LIBDIR, then the repository root inferred
+;;; from this source file, then the normal loader search path.
 (define-module (esquema ffi)
   #:use-module (system foreign)
   #:use-module (system foreign-library)
+  #:use-module (srfi srfi-1)
   #:export (esquema-init
+            esquema-version
+            esquema-errno
+            esquema-strerror
+            esquema-config-new
+            esquema-config-free
+            esquema-config-set-rootfs
+            esquema-config-set-hostname
+            esquema-config-add-arg
+            esquema-config-add-env
+            esquema-config-add-bind
+            esquema-config-set-namespaces
+            esquema-config-set-id-map
+            esquema-config-set-seccomp
+            esquema-config-set-drop-caps
+            esquema-config-set-rootfs-ro
+            esquema-config-set-memory-max
+            esquema-config-set-pids-max
+            esquema-config-set-cpu-max
+            esquema-config-set-cgroup-name
+            esquema-spawn
+            esquema-wait
+            esquema-apply-seccomp
+            esquema-drop-caps
+            esquema-no-new-privs
             esquema-unshare
-            esquema-drop-privs
-            esquema-apply-seccomp))
+            esquema-enter-cgroup))
 
-(define libesquema
-  (load-foreign-library
-   (string-append (getcwd) "/libesquema.so")))
+(define (resolve-libesquema)
+  ;; Repo root inferred by finding this module's *source* on the load path.
+  ;; Works even when the module was loaded from a compiled .go (where
+  ;; current-filename is #f). Never derived from the CWD, so a planted
+  ;; ./libesquema.so is never dlopen'd.
+  (define (from-load-path)
+    (let ((p (search-path %load-path "esquema/ffi.scm")))
+      (and p (dirname (dirname (dirname p))))))
+  (define (from-current-file)
+    (and (current-filename)
+         (dirname (dirname (dirname (current-filename))))))
+  (define dirs
+    (filter (lambda (x) (and (string? x) (not (string-null? x))))
+            (list (getenv "ESQUEMA_LIBDIR")
+                  (from-load-path)
+                  (from-current-file)
+                  "/usr/local/lib" "/usr/lib")))
+  (or (any (lambda (dir)
+             (false-if-exception
+              (load-foreign-library (string-append dir "/libesquema.so"))))
+           dirs)
+      ;; Fall back to the loader search path (LD_LIBRARY_PATH / ld.so.conf) —
+      ;; still not the CWD.
+      (false-if-exception (load-foreign-library "libesquema"))
+      (error "esquema: cannot locate libesquema.so — set ESQUEMA_LIBDIR"
+             dirs)))
 
-(define (c-func name return args)
-  (pointer->procedure
-   return
-   (foreign-library-pointer libesquema name)
-   args))
+(define libesquema (resolve-libesquema))
 
-(define esquema-init
-  (c-func "esquema_init" int '()))
+(define (c-fn name return args)
+  (pointer->procedure return
+                      (foreign-library-pointer libesquema name)
+                      args))
 
-(define esquema-unshare
-  (c-func "esquema_unshare" int (list int)))
+(define (->cstr s) (string->pointer s))
 
-(define esquema-drop-privs
-  (c-func "esquema_drop_privs" int '()))
+;;; ---- version / health / error ---------------------------------------
+(define %init      (c-fn "esquema_init" int '()))
+(define %version   (c-fn "esquema_version" '* '()))
+(define %errno     (c-fn "esquema_errno" int '()))
+(define %strerror  (c-fn "esquema_strerror" '* '()))
 
-(define esquema-apply-seccomp
-  (c-func "esquema_apply_seccomp" int '()))
+(define (esquema-init) (%init))
+(define (esquema-version) (pointer->string (%version)))
+(define (esquema-errno) (%errno))
+(define (esquema-strerror) (pointer->string (%strerror)))
+
+;;; ---- config builder -------------------------------------------------
+(define %cfg-new        (c-fn "esquema_config_new" '* '()))
+(define %cfg-free       (c-fn "esquema_config_free" void (list '*)))
+(define %cfg-rootfs     (c-fn "esquema_config_set_rootfs" int (list '* '*)))
+(define %cfg-hostname   (c-fn "esquema_config_set_hostname" int (list '* '*)))
+(define %cfg-add-arg    (c-fn "esquema_config_add_arg" int (list '* '*)))
+(define %cfg-add-env    (c-fn "esquema_config_add_env" int (list '* '*)))
+(define %cfg-add-bind   (c-fn "esquema_config_add_bind" int (list '* '* '* int)))
+(define %cfg-ns         (c-fn "esquema_config_set_namespaces" void (list '* unsigned-int)))
+(define %cfg-idmap      (c-fn "esquema_config_set_id_map" void (list '* unsigned-int unsigned-int)))
+(define %cfg-seccomp    (c-fn "esquema_config_set_seccomp" void (list '* int)))
+(define %cfg-dropcaps   (c-fn "esquema_config_set_drop_caps" void (list '* int)))
+(define %cfg-rootfs-ro  (c-fn "esquema_config_set_rootfs_ro" void (list '* int)))
+(define %cfg-mem        (c-fn "esquema_config_set_memory_max" void (list '* long)))
+(define %cfg-pids       (c-fn "esquema_config_set_pids_max" void (list '* long)))
+(define %cfg-cpu        (c-fn "esquema_config_set_cpu_max" void (list '* long long)))
+(define %cfg-cgname     (c-fn "esquema_config_set_cgroup_name" int (list '* '*)))
+
+(define (esquema-config-new) (%cfg-new))
+(define (esquema-config-free c) (%cfg-free c))
+(define (esquema-config-set-rootfs c s) (%cfg-rootfs c (->cstr s)))
+(define (esquema-config-set-hostname c s) (%cfg-hostname c (->cstr s)))
+(define (esquema-config-add-arg c s) (%cfg-add-arg c (->cstr s)))
+(define (esquema-config-add-env c s) (%cfg-add-env c (->cstr s)))
+(define (esquema-config-add-bind c src dst ro)
+  (%cfg-add-bind c (->cstr src) (->cstr dst) (if ro 1 0)))
+(define (esquema-config-set-namespaces c mask) (%cfg-ns c mask))
+(define (esquema-config-set-id-map c uid gid) (%cfg-idmap c uid gid))
+(define (esquema-config-set-seccomp c on) (%cfg-seccomp c (if on 1 0)))
+(define (esquema-config-set-drop-caps c on) (%cfg-dropcaps c (if on 1 0)))
+(define (esquema-config-set-rootfs-ro c on) (%cfg-rootfs-ro c (if on 1 0)))
+(define (esquema-config-set-memory-max c n) (%cfg-mem c n))
+(define (esquema-config-set-pids-max c n) (%cfg-pids c n))
+(define (esquema-config-set-cpu-max c q p) (%cfg-cpu c q p))
+(define (esquema-config-set-cgroup-name c s) (%cfg-cgname c (->cstr s)))
+
+;;; ---- lifecycle ------------------------------------------------------
+(define %spawn (c-fn "esquema_spawn" int (list '*)))
+(define %wait  (c-fn "esquema_wait" int (list int)))
+(define (esquema-spawn c) (%spawn c))
+(define (esquema-wait pid) (%wait pid))
+
+;;; ---- standalone primitives (tests) ----------------------------------
+(define %apply-seccomp (c-fn "esquema_apply_seccomp" int '()))
+(define %drop-caps     (c-fn "esquema_drop_caps" int '()))
+(define %nnp           (c-fn "esquema_no_new_privs" int '()))
+(define %unshare       (c-fn "esquema_unshare" int (list int)))
+(define %enter-cgroup  (c-fn "esquema_enter_cgroup" int (list '*)))
+
+(define (esquema-apply-seccomp) (%apply-seccomp))
+(define (esquema-drop-caps) (%drop-caps))
+(define (esquema-no-new-privs) (%nnp))
+(define (esquema-unshare flags) (%unshare flags))
+(define (esquema-enter-cgroup name) (%enter-cgroup (->cstr name)))

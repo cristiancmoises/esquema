@@ -1,33 +1,24 @@
-;; scheme/esquema/runtime.scm
+;;; runtime.scm — high-level entry points.
 (define-module (esquema runtime)
-  #:use-module (ice-9 posix)
   #:use-module (ice-9 format)
-  #:use-module (srfi srfi-1)
   #:use-module (esquema ffi)
+  #:use-module (esquema container)
   #:use-module (esquema sandbox)
+  #:re-export (make-container container)
   #:export (run-container
-           run-sandboxed
-           current-sandbox-state))
+            esquema-runtime-version))
 
-;; Global variable to hold sandbox state
-(define current-sandbox-state #f)
+(define (esquema-runtime-version) (esquema-version))
 
-;; Function to run a container
-(define (run-container name rootfs command)
-  (let ((c (container name rootfs command)))
-    (set! current-sandbox-state c)
-    c))
-
-;; Function to run code inside the sandbox
-(define (run-sandboxed proc)
-  (if current-sandbox-state
-      (let ((c current-sandbox-state))
-        ;; Here you can call your FFI functions to actually enter the sandbox
-        (format #t "Running in sandbox: ~a~%" (container-name c))
-        (proc))
-      (error "No sandbox initialized")))
-
-;; Initialize runtime
-(define (esquema-init)
-  ;; Just a placeholder to show that runtime loaded successfully
-  42)
+;;; Run a <container> to completion and return its exit status. This is the
+;;; single supported way to launch an (untrusted) payload: it delegates to
+;;; libesquema's esquema_spawn, which forks, isolates and execve()s.
+(define (run-container c)
+  (unless (container? c)
+    (error "run-container: expected a <container>" c))
+  (format #t "esquema: starting container ~s (rootfs ~a)~%"
+          (container-name c) (container-rootfs c))
+  (let ((rc (with-sandbox c)))
+    (format #t "esquema: container ~s exited with status ~a~%"
+            (container-name c) rc)
+    rc))

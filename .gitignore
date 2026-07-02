@@ -1,0 +1,12 @@
+# Build artifacts (rebuild with `make lib`).
+libesquema.so
+*.o
+*.go
+
+# Test scratch
+.test_primitives
+.test_primitives_asan
+examples/rootfs-min/
+
+# Guile compiled cache
+/**/*.go
