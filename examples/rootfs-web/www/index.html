@@ -1,2 +1,79 @@
-<h1>🔥 Esquema works</h1>
-<p>Guix-native containers</p>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Esquema — rootless Guile-native containers</title>
+<style>
+  :root{
+    --bg:#0a0e14; --panel:#111823; --edge:#1d2836; --ink:#e6edf3;
+    --mut:#8b98a9; --acc:#ff7a18; --acc2:#4fd1c5; --ok:#3fb950;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+    background:radial-gradient(1200px 800px at 80% -10%,#15203010,transparent),
+      radial-gradient(900px 700px at -10% 20%,#ff7a1810,transparent),var(--bg);
+    color:var(--ink);line-height:1.55;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:920px;margin:0 auto;padding:56px 24px 72px}
+  .live{display:inline-flex;align-items:center;gap:9px;font-family:var(--mono);
+    font-size:13px;color:var(--ok);background:#0d1a12;border:1px solid #16351f;
+    padding:7px 13px;border-radius:999px}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--ok);
+    box-shadow:0 0 0 0 #3fb95066;animation:pulse 1.8s infinite}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 #3fb95066}70%{box-shadow:0 0 0 10px #3fb95000}100%{box-shadow:0 0 0 0 #3fb95000}}
+  h1{font-size:clamp(40px,7vw,66px);margin:26px 0 6px;letter-spacing:-.03em;font-weight:800}
+  h1 .fire{background:linear-gradient(92deg,var(--acc),#ffb457);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .tag{font-size:clamp(17px,2.4vw,21px);color:var(--mut);max-width:640px;margin:0 0 14px}
+  .cmd{font-family:var(--mono);font-size:13.5px;color:#cdd9e5;background:var(--panel);
+    border:1px solid var(--edge);border-radius:12px;padding:14px 16px;margin:22px 0 34px;overflow-x:auto}
+  .cmd .p{color:var(--acc2)} .cmd .c{color:var(--mut)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;margin:8px 0 36px}
+  .card{background:var(--panel);border:1px solid var(--edge);border-radius:14px;padding:18px}
+  .card h3{margin:0 0 6px;font-size:15px;letter-spacing:.01em}
+  .card p{margin:0;color:var(--mut);font-size:13.5px}
+  .card .k{font-family:var(--mono);color:var(--acc);font-size:12px}
+  .foot{border-top:1px solid var(--edge);margin-top:10px;padding-top:20px;color:var(--mut);font-size:13px;
+    display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:space-between}
+  .pill{font-family:var(--mono);font-size:11.5px;color:#cdd9e5;border:1px solid var(--edge);
+    background:#0d141d;border-radius:999px;padding:4px 10px}
+  a{color:var(--acc2);text-decoration:none} a:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <span class="live"><span class="dot"></span>SERVED FROM INSIDE AN ESQUEMA CONTAINER</span>
+
+  <h1><span class="fire">Esquema</span> 🔥</h1>
+  <p class="tag">A minimal, security‑first, <b>rootless</b> container runtime built natively
+     in Scheme for GNU&nbsp;Guix — no daemon, no root, no YAML. This very page is being
+     served by <span style="font-family:var(--mono);color:#cdd9e5">busybox&nbsp;httpd</span>
+     running as PID&nbsp;1 in an isolated Esquema sandbox.</p>
+
+  <div class="cmd">
+    <span class="c">;; a container is a first-class Scheme value</span><br>
+    (<span class="p">run-container</span><br>
+    &nbsp;&nbsp;(<span class="p">make-container</span> "web" rootfs '("/bin/busybox" "httpd" "-p" "81"))<br>
+    &nbsp;&nbsp;<span class="c">;; secure by default: userns · seccomp · caps dropped</span>)
+  </div>
+
+  <div class="grid">
+    <div class="card"><h3>Rootless <span class="k">userns</span></h3><p>Runs as your ordinary user; root only <em>inside</em> the namespace.</p></div>
+    <div class="card"><h3>Full isolation</h3><p><span class="k">mount · pid · uts · ipc · net · cgroup</span> namespaces + pivot_root.</p></div>
+    <div class="card"><h3>seccomp‑BPF</h3><p>Syscall allowlist; TIOCSTI / ptrace / mount killed.</p></div>
+    <div class="card"><h3>No capabilities</h3><p>Bounding set emptied, securebits locked, <span class="k">no_new_privs</span>.</p></div>
+    <div class="card"><h3>cgroups v2</h3><p>Best‑effort <span class="k">memory · pids · cpu</span> limits.</p></div>
+    <div class="card"><h3>~13&nbsp;ms start</h3><p>All of it in async‑signal‑safe C between fork and execve.</p></div>
+  </div>
+
+  <div class="foot">
+    <span>Guile‑native · daemon‑free · GPL‑3.0 · packaged in the <b>securityops</b> Guix channel</span>
+    <span style="display:flex;gap:8px;flex-wrap:wrap">
+      <span class="pill">uid 0 (in‑ns)</span>
+      <span class="pill">CapEff: 0000000000000000</span>
+      <span class="pill">seccomp: mode&nbsp;2</span>
+    </span>
+  </div>
+</div>
+</body>
+</html>

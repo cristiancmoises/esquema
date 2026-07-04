@@ -8,5 +8,14 @@ libesquema.so
 .test_primitives_asan
 examples/rootfs-min/
 
+# Web-rootfs artifacts (regenerate with examples/build-web-rootfs.sh).
+# The page (www/) and mount-point layout are kept; the busybox binary,
+# its ~400 applet symlinks and the run-time mount targets are not.
+examples/rootfs-web/bin/
+examples/rootfs-web/gnu/
+examples/rootfs-web/dev/
+examples/rootfs-web/proc/
+examples/rootfs-web/tmp/
+
 # Guile compiled cache
 /**/*.go

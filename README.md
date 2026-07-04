@@ -93,6 +93,89 @@ capability dropped unless you opt out (`#:seccomp? #f`, `#:drop-caps? #f`,
 
 ---
 
+## Tutorial: host a website with Esquema
+
+Serve a real, browser-reachable website from inside an isolated Esquema
+container — rootless, seccomp-filtered, every capability dropped. Three steps.
+
+### 1. Build a web rootfs
+
+A rootfs is just a directory. The helper populates one with a full BusyBox
+userland (its `httpd` applet is the web server) plus the standard mount points:
+
+```sh
+examples/build-web-rootfs.sh examples/rootfs-web
+# drop your own files in examples/rootfs-web/www/ (index.html, assets, …)
+```
+
+BusyBox on Guix is dynamically linked, so the container bind-mounts
+`/gnu/store` **read-only** at run time to resolve its loader and libraries — no
+copying, and the store is world-readable already. (For a fully self-contained
+image, put a statically-linked server in `bin/` instead and skip the bind.)
+
+### 2. Describe the deployment
+
+A container is a value. `examples/deploy-web.scm`:
+
+```scheme
+(use-modules (esquema runtime) (esquema container))
+
+(define port (or (getenv "ESQ_PORT") "8081"))
+
+(run-container
+ (make-container "esquema-web" "/absolute/path/to/examples/rootfs-web"
+                 (list "/bin/httpd" "-f" "-v" "-p" port "-h" "/www")
+                 #:hostname   "esquema-web"
+                 ;; Drop 'net to SHARE the host network so the port is reachable;
+                 ;; keep it to isolate networking (then only loopback exists).
+                 #:namespaces '(user mount pid uts ipc cgroup)
+                 #:mounts     '(("/gnu/store" "gnu/store" #t))   ; ro: busybox libs
+                 #:limits     (make-limits (* 128 1024 1024) 64 #f #f)))
+```
+
+Everything except networking stays isolated: the payload is PID 1 in its own
+PID/mount/UTS/IPC namespace, `pivot_root`-ed into the rootfs, with an empty
+capability set and the seccomp filter loaded.
+
+### 3. Run it
+
+```sh
+# from a checkout (library on ESQUEMA_LIBDIR):
+ESQ_PORT=8081 guix shell -m manifest.scm -- \
+  env ESQUEMA_LIBDIR=$PWD guile -L scheme examples/deploy-web.scm
+
+# or, once installed from the securityops channel (guix install esquema):
+ESQ_PORT=8081 guile examples/deploy-web.scm
+```
+
+Verify and see the isolation the visitor's server runs under:
+
+```sh
+curl -s http://localhost:8081/ | head        # your page
+# what the server process itself sees:
+guile -c '(use-modules (esquema runtime)(esquema container))
+ (run-container (make-container "x" "'$PWD'/examples/rootfs-web"
+   (list "/bin/sh" "-c" "id -u; hostname; grep -E \"Cap|Seccomp\" /proc/self/status; ls /")
+   #:mounts (quote (("/gnu/store" "gnu/store" #t)))))'
+#  -> uid=0 (in-ns)  host=x  CapEff 0000000000000000  Seccomp: 2  / = just the rootfs
+```
+
+### Ports below 1024
+
+A rootless container can only bind an **unprivileged** port (≥ 1024 by default),
+so `8081` works out of the box but `80`/`81` do not. To serve on a privileged
+port, lower the threshold once (reversible), then use it:
+
+```sh
+sudo sysctl -w net.ipv4.ip_unprivileged_port_start=81   # revert with =1024
+ESQ_PORT=81 guile examples/deploy-web.scm
+```
+
+To keep it running across reboots, wrap it in the Shepherd service (below) or a
+`guix home` Shepherd service.
+
+---
+
 ## Testing
 
 ```sh

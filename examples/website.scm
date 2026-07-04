@@ -10,7 +10,7 @@
 (define web
   (make-container "website"
                   "examples/rootfs-web"
-                  '("/bin/busybox" "httpd" "-f" "-p" "8080" "-h" "/www")
+                  '("/bin/busybox" "httpd" "-f" "-p" "80" "-h" "/www")
                   #:hostname   "website"
                   #:rootfs-ro? #t
                   ;; httpd wants a network; keep the private netns (loopback is
