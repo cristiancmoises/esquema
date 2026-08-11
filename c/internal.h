@@ -17,6 +17,9 @@ enum {
     ES_EXIT_CAPS    = 95,
     ES_EXIT_SECCOMP = 96,
     ES_EXIT_REAP    = 97,
+    ES_EXIT_PARENT_ABORT = 98,
+    ES_EXIT_LANDLOCK = 99,
+    ES_EXIT_FDS     = 100,
     ES_EXIT_EXEC    = 127
 };
 
@@ -60,6 +63,12 @@ struct esquema_config {
     int seccomp;
     int drop_caps;
     int rootfs_ro;
+    int strict;
+    int landlock;
+
+    int   *preserve_fds;      /* sorted, unique; stdin/out/err are implicit */
+    size_t preserve_fds_n;
+    size_t preserve_fds_cap;
 
     long memory_max;          /* bytes,   <=0 unset */
     long pids_max;            /* count,   <=0 unset */
@@ -96,11 +105,23 @@ int es_setup_mounts(const struct esquema_config *cfg);
 /* Child side: bring the loopback interface up (best-effort). */
 int es_setup_loopback(void);
 
+/* ---- Landlock / descriptor confinement (payload child) -------------- */
+
+/* Restrict future path opens to PATH and its descendants.  Already-open
+ * descriptors are outside Landlock's scope and must be handled separately. */
+int es_landlock_restrict_root(const char *path);
+
+/* Close every inherited fd >= 3 except cfg->preserve_fds, clearing CLOEXEC
+ * on preserved descriptors so an explicitly delegated channel reaches the
+ * payload.  Uses close_range with a raw /proc/self/fd fallback. */
+int es_close_inherited_fds(const struct esquema_config *cfg);
+
 /* ---- cgroup v2 (parent side) ----------------------------------------- */
 
-/* Create the cgroup, apply limits, and move `pid` into it. Best-effort:
- * on a permission failure under rootless delegation it logs and returns 0
- * unless `strict`. Fills `created_path` (size len) for later cleanup. */
+/* Create the cgroup, apply and read back limits, then move `pid` into it and
+ * verify membership.  Returns -1 on any failure.  The caller decides whether
+ * that is a legacy best-effort warning or a strict launch failure.  Fills
+ * `created_path` (size len) for cleanup even after a partial setup. */
 int  es_cgroup_setup(const struct esquema_config *cfg, pid_t pid,
                      char *created_path, size_t len);
 void es_cgroup_cleanup(const char *created_path);

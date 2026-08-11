@@ -7,8 +7,11 @@
  */
 #define _GNU_SOURCE
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
 #include <unistd.h>
 #include <signal.h>
 #include <sched.h>
@@ -16,9 +19,10 @@
 #include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <linux/capability.h>
 
-#include "esquema.h"
+#include "internal.h"
 
 static int failures = 0;
 static void check(const char *name, int ok)
@@ -115,6 +119,88 @@ static void child_dropcaps(void)
     _exit(0);
 }
 
+static char landlock_allowed[PATH_MAX];
+static char landlock_allowed_file[PATH_MAX];
+static char landlock_secret_file[PATH_MAX];
+
+static void child_landlock_scope(void)
+{
+    if (es_landlock_restrict_root(landlock_allowed) < 0) _exit(70);
+    int fd = open(landlock_allowed_file, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) _exit(71);
+    close(fd);
+
+    errno = 0;
+    fd = open(landlock_secret_file, O_RDONLY | O_CLOEXEC);
+    if (fd >= 0) { close(fd); _exit(72); }
+    if (errno != EACCES && errno != EPERM) _exit(73);
+    _exit(0);
+}
+
+static int make_file(const char *path)
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (fd < 0) return -1;
+    int rc = write(fd, "x", 1) == 1 ? 0 : -1;
+    int e = errno;
+    close(fd);
+    errno = e;
+    return rc;
+}
+
+static int test_landlock_scope(void)
+{
+    char base[] = "/tmp/esq-landlock-XXXXXX";
+    if (!mkdtemp(base)) return 0;
+    int ok = 0;
+    if (snprintf(landlock_allowed, sizeof landlock_allowed, "%s/allowed", base)
+            >= (int) sizeof landlock_allowed ||
+        snprintf(landlock_allowed_file, sizeof landlock_allowed_file,
+                 "%s/inside", landlock_allowed) >=
+            (int) sizeof landlock_allowed_file ||
+        snprintf(landlock_secret_file, sizeof landlock_secret_file,
+                 "%s/host-secret", base) >=
+            (int) sizeof landlock_secret_file)
+        goto out;
+    if (mkdir(landlock_allowed, 0700) < 0) goto out;
+    if (make_file(landlock_allowed_file) < 0 ||
+        make_file(landlock_secret_file) < 0)
+        goto out;
+
+    int st = run_child(child_landlock_scope);
+    ok = WIFEXITED(st) && WEXITSTATUS(st) == 0;
+out:
+    unlink(landlock_allowed_file);
+    unlink(landlock_secret_file);
+    rmdir(landlock_allowed);
+    rmdir(base);
+    return ok;
+}
+
+/* A bad cgroup name deterministically fails after the setup child has been
+ * forked but while it is still blocked on the parent gate.  Strict mode must
+ * return failure and synchronously reap that child. */
+static int test_strict_cgroup_failure(int *clean_teardown)
+{
+    esquema_config *cfg = esquema_config_new();
+    if (!cfg) return 0;
+    int configured =
+        esquema_config_set_rootfs(cfg, "/") == 0 &&
+        esquema_config_add_arg(cfg, "/bin/false") == 0 &&
+        esquema_config_set_cgroup_name(cfg, "invalid/name") == 0;
+    esquema_config_set_memory_max(cfg, 4096);
+    esquema_config_set_strict(cfg, 1);
+    pid_t pid = configured ? esquema_spawn(cfg) : -2;
+    int saved = esquema_errno();
+    esquema_config_free(cfg);
+
+    errno = 0;
+    int st = 0;
+    pid_t leftover = waitpid(-1, &st, WNOHANG);
+    *clean_teardown = leftover == -1 && errno == ECHILD;
+    return pid == -1 && saved == EINVAL;
+}
+
 int main(void)
 {
     printf("Esquema C primitive tests (version %s)\n", esquema_version());
@@ -160,6 +246,28 @@ int main(void)
         int st = run_child(child_dropcaps);
         check("drop_caps: caps emptied + NNP set (exit 0)",
               WIFEXITED(st) && WEXITSTATUS(st) == 0);
+    }
+
+    /* ---- Landlock ABI + path scope ---- */
+    {
+        int abi = esquema_landlock_abi();
+        if (abi > 0) {
+            char label[96];
+            snprintf(label, sizeof label,
+                     "landlock ABI %d: allowed root works, host secret denied", abi);
+            check(label, test_landlock_scope());
+        } else {
+            printf("BLOCKED landlock: kernel reports ABI %d (%s)\n",
+                   abi, abi < 0 ? strerror(errno) : "unsupported");
+        }
+    }
+
+    /* ---- strict cgroup failure and abort cleanup ---- */
+    {
+        int clean = 0;
+        check("strict mode: cgroup setup failure aborts launch",
+              test_strict_cgroup_failure(&clean));
+        check("strict mode: aborted setup child is synchronously reaped", clean);
     }
 
     /* ---- granular API input validation (safe in-process) ---- */

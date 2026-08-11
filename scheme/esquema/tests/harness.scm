@@ -73,8 +73,11 @@
                      (namespaces '(user mount pid uts ipc net cgroup))
                      (seccomp? #t)
                      (drop-caps? #t)
+                     (strict? #f)
+                     (landlock? #t)
                      (env '(("PATH" . "/bin")))
-                     (mounts '()))
+                     (mounts '())
+                     (preserve-fds '()))
   (let* ((outfile "/esq-out")
          (wrapped (string-append "( " script " ) > " outfile " 2>&1"))
          (c (make-container "test" rootfs
@@ -82,8 +85,11 @@
                             #:namespaces namespaces
                             #:seccomp? seccomp?
                             #:drop-caps? drop-caps?
+                            #:strict? strict?
+                            #:landlock? landlock?
                             #:env env
-                            #:mounts mounts))
+                            #:mounts mounts
+                            #:preserve-fds preserve-fds))
          (rc (with-sandbox c))
          (out (file-content (string-append rootfs outfile))))
     (values rc out)))
@@ -103,13 +109,19 @@
                      (seccomp? #t)
                      (drop-caps? #t)
                      (rootfs-ro? #f)
+                     (strict? #f)
+                     (landlock? #t)
                      (env '(("PATH" . "/bin")))
-                     (mounts '()))
+                     (mounts '())
+                     (preserve-fds '()))
   (with-sandbox
    (make-container "test" rootfs (list "/bin/sh" "-c" script)
                    #:namespaces namespaces
                    #:seccomp? seccomp?
                    #:drop-caps? drop-caps?
                    #:rootfs-ro? rootfs-ro?
+                   #:strict? strict?
+                   #:landlock? landlock?
                    #:env env
-                   #:mounts mounts)))
+                   #:mounts mounts
+                   #:preserve-fds preserve-fds)))

@@ -30,19 +30,20 @@
 static __thread pid_t  g_cg_pid[ES_CG_SLOTS];
 static __thread char  *g_cg_path[ES_CG_SLOTS];
 
-static void cg_store(pid_t pid, const char *path)
+static int cg_store(pid_t pid, const char *path)
 {
-    if (!path || !path[0]) return;
+    if (!path || !path[0]) return 0;
     for (int i = 0; i < ES_CG_SLOTS; i++) {
         if (g_cg_pid[i] == 0) {
             char *p = strdup(path);
-            if (!p) return;                 /* best-effort */
+            if (!p) { errno = ENOMEM; return -1; }
             g_cg_path[i] = p;
             g_cg_pid[i]  = pid;
-            return;
+            return 0;
         }
     }
-    /* table full: leak this one rather than mis-associate (very rare) */
+    errno = ENOSPC;
+    return -1;
 }
 
 /* Detach and return the path for `pid` (caller frees), or NULL. */
@@ -78,6 +79,28 @@ static char *default_env[] = {
     NULL
 };
 
+static int strict_config_ok(const esquema_config *cfg)
+{
+    if (!cfg->strict) return 1;
+    if (!cfg->seccomp || !cfg->drop_caps || !cfg->landlock) return 0;
+    if ((cfg->ns_mask & ESQUEMA_NS_ALL) != ESQUEMA_NS_ALL) return 0;
+    if (!cfg->cgroup_name) return 0;
+    if (cfg->memory_max <= 0 && cfg->pids_max <= 0 && cfg->cpu_quota_us <= 0)
+        return 0;
+    return 1;
+}
+
+/* A is blocked on the gate and therefore has not unshared or launched any
+ * payload yet.  Closing the gate makes it exit, after which partial cgroup
+ * state can be removed without racing a live process. */
+static void abort_blocked_child(int gate_fd, pid_t pid, const char *cg_path)
+{
+    close(gate_fd);
+    int st;
+    while (waitpid(pid, &st, 0) < 0 && errno == EINTR) { }
+    if (cg_path && cg_path[0]) es_cgroup_cleanup(cg_path);
+}
+
 pid_t esquema_spawn(esquema_config *cfg)
 {
     es_clear_error();
@@ -85,6 +108,10 @@ pid_t esquema_spawn(esquema_config *cfg)
     if (!cfg || !cfg->rootfs) { errno = EINVAL; return (pid_t) es_fail("spawn: no rootfs"); }
     if (cfg->argc == 0 || !cfg->argv || !cfg->argv[0]) {
         errno = EINVAL; return (pid_t) es_fail("spawn: no command");
+    }
+    if (!strict_config_ok(cfg)) {
+        errno = EINVAL;
+        return (pid_t) es_fail("spawn: incomplete strict configuration");
     }
 
     /* Resolve rootfs to an absolute path (pivot_root needs one) and store it
@@ -138,9 +165,11 @@ pid_t esquema_spawn(esquema_config *cfg)
          * waitpid below fail with ECHILD instead of returning B's status. */
         signal(SIGCHLD, SIG_DFL);
 
-        char ch;
-        while (read(sp[0], &ch, 1) < 0 && errno == EINTR) { }
+        char ch = '\0';
+        ssize_t gate;
+        do { gate = read(sp[0], &ch, 1); } while (gate < 0 && errno == EINTR);
         close(sp[0]);
+        if (gate != 1 || ch != 'x') _exit(ES_EXIT_PARENT_ABORT);
 
         if (unshare((int) flags) < 0) _exit(ES_EXIT_UNSHARE);
 
@@ -163,14 +192,22 @@ pid_t esquema_spawn(esquema_config *cfg)
              * seccomp block). */
             setsid();
             if (es_setup_mounts(cfg) < 0) _exit(ES_EXIT_MOUNT);
-            if (cfg->ns_mask & ESQUEMA_NS_NET)
-                es_setup_loopback();                /* best-effort */
+            if ((cfg->ns_mask & ESQUEMA_NS_NET) && es_setup_loopback() < 0 &&
+                cfg->strict)
+                _exit(ES_EXIT_UNSHARE);
 
             if (cfg->drop_caps) {
                 if (es_drop_all_caps() < 0) _exit(ES_EXIT_CAPS);
             } else {
-                prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+                if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0)
+                    _exit(ES_EXIT_CAPS);
             }
+
+            if (cfg->landlock && es_landlock_restrict_root("/") < 0 &&
+                cfg->strict)
+                _exit(ES_EXIT_LANDLOCK);
+
+            if (es_close_inherited_fds(cfg) < 0) _exit(ES_EXIT_FDS);
 
             if (have_seccomp) {
                 /* TTY-injection killer first (default-allow), then the main
@@ -181,6 +218,14 @@ pid_t esquema_spawn(esquema_config *cfg)
 
             execve(cfg->argv[0], cfg->argv, envp);
             _exit(ES_EXIT_EXEC);
+        }
+
+        /* The trusted setup/reaper process needs no ambient capability FDs.
+         * B already inherited its explicit allowlist before this close. */
+        if (es_close_inherited_fds(NULL) < 0) {
+            kill(b, SIGKILL);
+            while (waitpid(b, NULL, 0) < 0 && errno == EINTR) { }
+            _exit(ES_EXIT_FDS);
         }
 
         /* A reaps B and mirrors its status. `st` is initialised so a
@@ -199,14 +244,30 @@ pid_t esquema_spawn(esquema_config *cfg)
     /* ========================= parent P ========================= */
     close(sp[0]);
 
+    char cg_path[PATH_MAX] = { 0 };
     if (cfg->cgroup_name &&
         (cfg->memory_max > 0 || cfg->pids_max > 0 || cfg->cpu_quota_us > 0)) {
-        /* Best-effort under rootless delegation; move A (B inherits it).
-         * Remember any created path against A's pid so esquema_wait cleans up
-         * exactly this container's cgroup. */
-        char path[PATH_MAX];
-        es_cgroup_setup(cfg, a, path, sizeof path);
-        if (path[0]) cg_store(a, path);
+        /* A remains blocked until all requested limits have been installed,
+         * read back, and its membership verified. */
+        int cg_rc = es_cgroup_setup(cfg, a, cg_path, sizeof cg_path);
+        int cg_errno = errno;
+        int store_rc = 0;
+        if (cg_path[0]) store_rc = cg_store(a, cg_path);
+        if (store_rc < 0 || (cfg->strict && cg_rc < 0)) {
+            int failure = store_rc < 0 ? errno : cg_errno;
+            /* Do not leave an entry pointing to state we clean synchronously. */
+            char *tracked = cg_take(a);
+            if (tracked) free(tracked);
+            abort_blocked_child(sp[1], a, cg_path);
+            if (have_seccomp) {
+                es_seccomp_free_program(&prog);
+                es_seccomp_free_program(&prog_tty);
+            }
+            errno = failure;
+            return (pid_t) es_fail(store_rc < 0
+                                   ? "spawn: cgroup cleanup tracking"
+                                   : "spawn: strict cgroup setup");
+        }
     }
 
     /* Release A. */

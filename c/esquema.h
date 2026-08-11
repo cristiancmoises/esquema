@@ -69,12 +69,30 @@ int esquema_config_add_env(esquema_config *cfg, const char *keyval);
 int esquema_config_add_bind(esquema_config *cfg, const char *src,
                             const char *dst, int read_only);
 
+/* Preserve one already-open descriptor across the payload exec.  Descriptors
+ * 0, 1 and 2 are always preserved; every other inherited descriptor is
+ * closed.  This explicit allowlist is intended for capability-scoped,
+ * pre-opened channels such as an evcell-agent socket.  The descriptor must be
+ * open when it is registered and remains owned by the caller. */
+int esquema_config_preserve_fd(esquema_config *cfg, int fd);
+
 void esquema_config_set_namespaces(esquema_config *cfg, unsigned int ns_mask);
 void esquema_config_set_id_map(esquema_config *cfg, unsigned int uid,
                                unsigned int gid);
 void esquema_config_set_seccomp(esquema_config *cfg, int enable);
 void esquema_config_set_drop_caps(esquema_config *cfg, int enable);
 void esquema_config_set_rootfs_ro(esquema_config *cfg, int read_only);
+
+/* Fortress mode makes requested security controls fail closed.  In
+ * particular, a requested cgroup limit must be installed and read back, and
+ * the default Landlock root policy must be enforceable.  Legacy mode remains
+ * the default for API compatibility and treats unavailable cgroup delegation
+ * or Landlock as best-effort. */
+void esquema_config_set_strict(esquema_config *cfg, int enable);
+
+/* Enable the Landlock "no new filesystem access outside the post-pivot root"
+ * layer.  It is enabled by default.  Failure is fatal only in strict mode. */
+void esquema_config_set_landlock(esquema_config *cfg, int enable);
 
 /* Resource limits (cgroup v2, best-effort under rootless delegation).
  * A value <= 0 leaves the corresponding limit unset. */
@@ -104,6 +122,10 @@ int esquema_drop_caps(void);
 
 /* prctl(PR_SET_NO_NEW_PRIVS). */
 int esquema_no_new_privs(void);
+
+/* Return the running kernel's Landlock ABI (>0), 0 when unsupported, or -1
+ * for another query error.  This reports availability, not policy strength. */
+int esquema_landlock_abi(void);
 
 /* ---- legacy granular API (retained, hardened) ------------------------ */
 

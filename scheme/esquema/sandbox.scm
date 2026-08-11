@@ -29,19 +29,33 @@
         (apply throw key args)))))
 
 (define (fill-config! cfg c)
-    (esquema-config-set-rootfs cfg (container-rootfs c))
+    (define (checked stage rc)
+      (unless (zero? rc)
+        (error (string-append "esquema config failed: " stage)
+               (esquema-strerror))))
+    (checked "rootfs"
+             (esquema-config-set-rootfs cfg (container-rootfs c)))
     (when (container-hostname c)
-      (esquema-config-set-hostname cfg (container-hostname c)))
-    (for-each (lambda (a) (esquema-config-add-arg cfg a))
+      (checked "hostname"
+               (esquema-config-set-hostname cfg (container-hostname c))))
+    (for-each (lambda (a) (checked "argument"
+                                    (esquema-config-add-arg cfg a)))
               (container-command c))
     (for-each (lambda (kv)
-                (esquema-config-add-env
-                 cfg (string-append (car kv) "=" (cdr kv))))
+                (checked "environment"
+                         (esquema-config-add-env
+                          cfg (string-append (car kv) "=" (cdr kv)))))
               (container-env c))
     (for-each (lambda (m)
-                (esquema-config-add-bind cfg (car m) (cadr m)
-                                         (and (pair? (cddr m)) (caddr m))))
+                (checked "bind mount"
+                         (esquema-config-add-bind
+                          cfg (car m) (cadr m)
+                          (and (pair? (cddr m)) (caddr m)))))
               (container-mounts c))
+    (for-each (lambda (fd)
+                (checked "preserved descriptor"
+                         (esquema-config-preserve-fd cfg fd)))
+              (container-preserve-fds c))
     (esquema-config-set-namespaces
      cfg (namespaces->mask (container-namespaces c)))
     (let ((idm (container-id-map c)))
@@ -49,10 +63,14 @@
     (esquema-config-set-seccomp cfg (container-seccomp? c))
     (esquema-config-set-drop-caps cfg (container-drop-caps? c))
     (esquema-config-set-rootfs-ro cfg (container-rootfs-ro? c))
+    (esquema-config-set-strict cfg (container-strict? c))
+    (esquema-config-set-landlock cfg (container-landlock? c))
     (let ((lim (container-limits c))
           (cg  (container-cgroup-name c)))
       (when (or lim cg)
-        (esquema-config-set-cgroup-name cfg (or cg (container-name c)))
+        (checked "cgroup name"
+                 (esquema-config-set-cgroup-name
+                  cfg (or cg (container-name c))))
         (when lim
           (when (limits-memory-max lim)
             (esquema-config-set-memory-max cfg (limits-memory-max lim)))

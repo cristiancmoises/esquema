@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -43,8 +44,11 @@ static int cgroup_base(char *out, size_t outsz)
     buf[n] = '\0';
 
     const char *rel = NULL;
-    for (char *line = strtok(buf, "\n"); line; line = strtok(NULL, "\n")) {
+    for (char *line = buf; line && *line;) {
+        char *next = strchr(line, '\n');
+        if (next) *next++ = '\0';
         if (strncmp(line, "0::", 3) == 0) { rel = line + 3; break; }
+        line = next;
     }
     if (!rel) { errno = ENOTSUP; return -1; }
 
@@ -64,6 +68,57 @@ static int write_limit(const char *dir, const char *file, const char *val)
      * enforced must NOT look like success. Callers that treat cgroups as
      * best-effort ignore the return; those that need the limit see the error. */
     return es_write_file(path, val, strlen(val));
+}
+
+static int read_limit(const char *dir, const char *file,
+                      char *buf, size_t bufsz)
+{
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof path, "%s/%s", dir, file);
+    if (n < 0 || n >= (int) sizeof path || bufsz < 2) {
+        errno = ENAMETOOLONG; return -1;
+    }
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    ssize_t got;
+    do { got = read(fd, buf, bufsz - 1); } while (got < 0 && errno == EINTR);
+    int e = errno;
+    close(fd);
+    if (got <= 0) { errno = got == 0 ? EIO : e; return -1; }
+    buf[got] = '\0';
+    while (got > 0 && (buf[got - 1] == '\n' || buf[got - 1] == ' ' ||
+                       buf[got - 1] == '\t'))
+        buf[--got] = '\0';
+    return 0;
+}
+
+/* A successful write is not sufficient evidence that a controller accepted
+ * the requested value.  Read it back before the blocked child is released. */
+static int write_and_verify(const char *dir, const char *file, const char *val)
+{
+    char actual[128];
+    if (write_limit(dir, file, val) < 0) return -1;
+    if (read_limit(dir, file, actual, sizeof actual) < 0) return -1;
+    if (strcmp(actual, val) != 0) { errno = ERANGE; return -1; }
+    return 0;
+}
+
+static int verify_pid(const char *dir, pid_t pid)
+{
+    char actual[4096];
+    if (read_limit(dir, "cgroup.procs", actual, sizeof actual) < 0) return -1;
+    const char *p = actual;
+    while (*p) {
+        char *end = NULL;
+        errno = 0;
+        long found = strtol(p, &end, 10);
+        if (end == p || errno) { errno = EIO; return -1; }
+        if (found == (long) pid) return 0;
+        p = end;
+        while (*p == '\n' || *p == ' ' || *p == '\t') p++;
+    }
+    errno = ESRCH;
+    return -1;
 }
 
 /* Create base/esquema-<name> (supervisor) + /leaf, enable controllers on the
@@ -95,19 +150,20 @@ int es_cgroup_setup(const struct esquema_config *cfg, pid_t pid,
 
     if (cfg->memory_max > 0) {
         snprintf(buf, sizeof buf, "%ld", cfg->memory_max);
-        if (write_limit(leaf, "memory.max", buf) < 0) return -1;
+        if (write_and_verify(leaf, "memory.max", buf) < 0) return -1;
     }
     if (cfg->pids_max > 0) {
         snprintf(buf, sizeof buf, "%ld", cfg->pids_max);
-        if (write_limit(leaf, "pids.max", buf) < 0) return -1;
+        if (write_and_verify(leaf, "pids.max", buf) < 0) return -1;
     }
     if (cfg->cpu_quota_us > 0) {
         snprintf(buf, sizeof buf, "%ld %ld", cfg->cpu_quota_us, cfg->cpu_period_us);
-        if (write_limit(leaf, "cpu.max", buf) < 0) return -1;
+        if (write_and_verify(leaf, "cpu.max", buf) < 0) return -1;
     }
 
     snprintf(buf, sizeof buf, "%ld", (long) pid);
     if (write_limit(leaf, "cgroup.procs", buf) < 0) return -1;
+    if (verify_pid(leaf, pid) < 0) return -1;
     return 0;
 }
 

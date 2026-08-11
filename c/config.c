@@ -2,6 +2,7 @@
 #include "internal.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -51,6 +52,8 @@ esquema_config *esquema_config_new(void)
     c->seccomp       = 1;
     c->drop_caps     = 1;
     c->rootfs_ro     = 0;
+    c->strict        = 0;
+    c->landlock      = 1;
     c->memory_max    = -1;
     c->pids_max      = -1;
     c->cpu_quota_us  = -1;
@@ -73,6 +76,7 @@ void esquema_config_free(esquema_config *cfg)
         free(cfg->binds[i].dst);
     }
     free(cfg->binds);
+    free(cfg->preserve_fds);
     free(cfg);
 }
 
@@ -124,6 +128,31 @@ int esquema_config_add_bind(esquema_config *cfg, const char *src,
     return 0;
 }
 
+int esquema_config_preserve_fd(esquema_config *cfg, int fd)
+{
+    if (!cfg || fd < 3) { errno = EINVAL; return es_fail("preserve_fd"); }
+    if (fcntl(fd, F_GETFD) < 0) return es_fail("preserve_fd: not open");
+
+    size_t pos = 0;
+    while (pos < cfg->preserve_fds_n && cfg->preserve_fds[pos] < fd) pos++;
+    if (pos < cfg->preserve_fds_n && cfg->preserve_fds[pos] == fd) return 0;
+    if (cfg->preserve_fds_n >= 64) {
+        errno = E2BIG; return es_fail("preserve_fd: too many");
+    }
+    if (cfg->preserve_fds_n + 1 > cfg->preserve_fds_cap) {
+        size_t ncap = cfg->preserve_fds_cap ? cfg->preserve_fds_cap * 2 : 4;
+        int *nf = realloc(cfg->preserve_fds, ncap * sizeof *nf);
+        if (!nf) { errno = ENOMEM; return es_fail("preserve_fd"); }
+        cfg->preserve_fds = nf;
+        cfg->preserve_fds_cap = ncap;
+    }
+    memmove(&cfg->preserve_fds[pos + 1], &cfg->preserve_fds[pos],
+            (cfg->preserve_fds_n - pos) * sizeof *cfg->preserve_fds);
+    cfg->preserve_fds[pos] = fd;
+    cfg->preserve_fds_n++;
+    return 0;
+}
+
 void esquema_config_set_namespaces(esquema_config *cfg, unsigned int ns_mask)
 {
     if (cfg) cfg->ns_mask = ns_mask & ESQUEMA_NS_ALL;
@@ -148,6 +177,16 @@ void esquema_config_set_drop_caps(esquema_config *cfg, int enable)
 void esquema_config_set_rootfs_ro(esquema_config *cfg, int read_only)
 {
     if (cfg) cfg->rootfs_ro = read_only ? 1 : 0;
+}
+
+void esquema_config_set_strict(esquema_config *cfg, int enable)
+{
+    if (cfg) cfg->strict = enable ? 1 : 0;
+}
+
+void esquema_config_set_landlock(esquema_config *cfg, int enable)
+{
+    if (cfg) cfg->landlock = enable ? 1 : 0;
 }
 
 void esquema_config_set_memory_max(esquema_config *cfg, long bytes)

@@ -16,6 +16,9 @@
             container-seccomp?
             container-drop-caps?
             container-rootfs-ro?
+            container-strict?
+            container-landlock?
+            container-preserve-fds
             container-cgroup-name
             container-limits
             make-limits
@@ -36,7 +39,8 @@
 
 (define-record-type <container>
   (%make-container name rootfs command env mounts namespaces hostname
-                   id-map seccomp? drop-caps? rootfs-ro? cgroup-name limits)
+                   id-map seccomp? drop-caps? rootfs-ro? cgroup-name limits
+                   strict? landlock? preserve-fds)
   container?
   (name         container-name)
   (rootfs       container-rootfs)
@@ -50,7 +54,10 @@
   (drop-caps?   container-drop-caps?)
   (rootfs-ro?   container-rootfs-ro?)
   (cgroup-name  container-cgroup-name)
-  (limits       container-limits))     ; <limits> or #f
+  (limits       container-limits)      ; <limits> or #f
+  (strict?      container-strict?)
+  (landlock?    container-landlock?)
+  (preserve-fds container-preserve-fds)) ; explicit exec capability FDs
 
 ;;; Full keyword constructor with secure-by-default settings.
 (define* (make-container name rootfs command
@@ -64,12 +71,21 @@
                          (drop-caps? #t)
                          (rootfs-ro? #f)
                          (cgroup-name #f)
-                         (limits #f))
+                         (limits #f)
+                         (strict? #f)
+                         (landlock? #t)
+                         (preserve-fds '()))
   (unless (string? rootfs) (error "container: rootfs must be a string" rootfs))
   (unless (and (list? command) (every string? command) (pair? command))
     (error "container: command must be a non-empty list of strings" command))
+  (unless (and (list? preserve-fds)
+               (every (lambda (fd) (and (integer? fd) (>= fd 3)))
+                      preserve-fds))
+    (error "container: preserve-fds must contain descriptors >= 3"
+           preserve-fds))
   (%make-container name rootfs command env mounts namespaces hostname
-                   id-map seccomp? drop-caps? rootfs-ro? cgroup-name limits))
+                   id-map seccomp? drop-caps? rootfs-ro? cgroup-name limits
+                   strict? landlock? preserve-fds))
 
 ;;; Back-compat: the original three-argument positional constructor.
 (define (container name rootfs command)

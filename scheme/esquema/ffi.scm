@@ -19,11 +19,14 @@
             esquema-config-add-arg
             esquema-config-add-env
             esquema-config-add-bind
+            esquema-config-preserve-fd
             esquema-config-set-namespaces
             esquema-config-set-id-map
             esquema-config-set-seccomp
             esquema-config-set-drop-caps
             esquema-config-set-rootfs-ro
+            esquema-config-set-strict
+            esquema-config-set-landlock
             esquema-config-set-memory-max
             esquema-config-set-pids-max
             esquema-config-set-cpu-max
@@ -33,6 +36,7 @@
             esquema-apply-seccomp
             esquema-drop-caps
             esquema-no-new-privs
+            esquema-landlock-abi
             esquema-unshare
             esquema-enter-cgroup))
 
@@ -91,11 +95,14 @@
 (define %cfg-add-arg    (c-fn "esquema_config_add_arg" int (list '* '*)))
 (define %cfg-add-env    (c-fn "esquema_config_add_env" int (list '* '*)))
 (define %cfg-add-bind   (c-fn "esquema_config_add_bind" int (list '* '* '* int)))
+(define %cfg-keep-fd    (c-fn "esquema_config_preserve_fd" int (list '* int)))
 (define %cfg-ns         (c-fn "esquema_config_set_namespaces" void (list '* unsigned-int)))
 (define %cfg-idmap      (c-fn "esquema_config_set_id_map" void (list '* unsigned-int unsigned-int)))
 (define %cfg-seccomp    (c-fn "esquema_config_set_seccomp" void (list '* int)))
 (define %cfg-dropcaps   (c-fn "esquema_config_set_drop_caps" void (list '* int)))
 (define %cfg-rootfs-ro  (c-fn "esquema_config_set_rootfs_ro" void (list '* int)))
+(define %cfg-strict     (c-fn "esquema_config_set_strict" void (list '* int)))
+(define %cfg-landlock   (c-fn "esquema_config_set_landlock" void (list '* int)))
 (define %cfg-mem        (c-fn "esquema_config_set_memory_max" void (list '* long)))
 (define %cfg-pids       (c-fn "esquema_config_set_pids_max" void (list '* long)))
 (define %cfg-cpu        (c-fn "esquema_config_set_cpu_max" void (list '* long long)))
@@ -109,11 +116,14 @@
 (define (esquema-config-add-env c s) (%cfg-add-env c (->cstr s)))
 (define (esquema-config-add-bind c src dst ro)
   (%cfg-add-bind c (->cstr src) (->cstr dst) (if ro 1 0)))
+(define (esquema-config-preserve-fd c fd) (%cfg-keep-fd c fd))
 (define (esquema-config-set-namespaces c mask) (%cfg-ns c mask))
 (define (esquema-config-set-id-map c uid gid) (%cfg-idmap c uid gid))
 (define (esquema-config-set-seccomp c on) (%cfg-seccomp c (if on 1 0)))
 (define (esquema-config-set-drop-caps c on) (%cfg-dropcaps c (if on 1 0)))
 (define (esquema-config-set-rootfs-ro c on) (%cfg-rootfs-ro c (if on 1 0)))
+(define (esquema-config-set-strict c on) (%cfg-strict c (if on 1 0)))
+(define (esquema-config-set-landlock c on) (%cfg-landlock c (if on 1 0)))
 (define (esquema-config-set-memory-max c n) (%cfg-mem c n))
 (define (esquema-config-set-pids-max c n) (%cfg-pids c n))
 (define (esquema-config-set-cpu-max c q p) (%cfg-cpu c q p))
@@ -129,11 +139,13 @@
 (define %apply-seccomp (c-fn "esquema_apply_seccomp" int '()))
 (define %drop-caps     (c-fn "esquema_drop_caps" int '()))
 (define %nnp           (c-fn "esquema_no_new_privs" int '()))
+(define %landlock-abi  (c-fn "esquema_landlock_abi" int '()))
 (define %unshare       (c-fn "esquema_unshare" int (list int)))
 (define %enter-cgroup  (c-fn "esquema_enter_cgroup" int (list '*)))
 
 (define (esquema-apply-seccomp) (%apply-seccomp))
 (define (esquema-drop-caps) (%drop-caps))
 (define (esquema-no-new-privs) (%nnp))
+(define (esquema-landlock-abi) (%landlock-abi))
 (define (esquema-unshare flags) (%unshare flags))
 (define (esquema-enter-cgroup name) (%enter-cgroup (->cstr name)))

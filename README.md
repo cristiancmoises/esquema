@@ -28,8 +28,20 @@ async-signal-safe C between `fork` and `execve`:
 5. **seccomp-BPF allowlist** — default `ENOSYS`, with a `KILL_PROCESS` deny-set
    for `ptrace`, `mount`, `unshare`, `setns`, `bpf`, `keyctl`, module and kexec
    syscalls, etc. Non-native (incl. x32) ABIs are killed.
-6. **cgroups v2 limits** (best-effort under rootless delegation) — `memory.max`,
-   `pids.max`, `cpu.max`.
+6. **Landlock filesystem scope** — when the running kernel supports Landlock,
+   future path opens covered by the build-time Landlock headers are confined
+   beneath the post-`pivot_root` filesystem.
+   This base rule prevents new access outside the cell root; it is not yet a
+   per-directory least-privilege policy and it cannot revoke an already-open
+   descriptor.
+7. **Descriptor capability closure** — every inherited descriptor above 2 is
+   closed before `execve`, unless the trusted caller explicitly registered it
+   with `#:preserve-fds` / `esquema_config_preserve_fd`. This is the mechanism
+   intended for a pre-opened, capability-scoped agent channel.
+8. **cgroups v2 limits** — legacy mode remains best-effort under rootless
+   delegation. Opt-in `#:strict? #t` mode installs and reads back every
+   requested `memory.max`, `pids.max`, and `cpu.max` value before releasing the
+   payload, and aborts cleanly if delegation or verification fails.
 
 This is verified by the test-suite (see *Testing*): the payload cannot see host
 PIDs, cannot reach the host filesystem, has an empty capability set, is killed
@@ -90,6 +102,21 @@ Define and run a container from Scheme:
 `make-container` is **secure by default**: all namespaces, seccomp on, and every
 capability dropped unless you opt out (`#:seccomp? #f`, `#:drop-caps? #f`,
 `#:namespaces '(user mount pid ...)`).
+
+Landlock is defence in depth, not a complete filesystem monitor. It does not
+mediate reads and writes on files opened before restriction, and Linux does
+not currently mediate every metadata operation (for example all `chmod`,
+`chown`, `stat`, or extended-attribute cases). Esquema handles only rights
+known to the Linux UAPI headers used for the build; a higher runtime ABI does
+not justify claiming coverage for rights unknown to those headers.
+
+Fortress callers must additionally select `#:strict? #t`, provide at least one
+cgroup limit, and leave all namespaces, seccomp, capability dropping, and
+Landlock enabled. Strict mode deliberately fails when the host has not
+delegated the requested cgroup controllers; it never silently converts a
+mandatory limit into best-effort operation. The legacy constructor and its
+best-effort cgroup behavior remain available for compatibility, but are not a
+Fortress boundary.
 
 ---
 
@@ -188,7 +215,9 @@ guix shell -m manifest.scm -- make sanitize    # ASan + UBSan build and run
 The suite covers functional behaviour (`scheme/esquema/tests/functional.scm`),
 isolation and escape attempts with positive+negative controls
 (`security.scm`), C-level enforcement including the seccomp `SIGSYS` kill
-(`tests/c/test_primitives.c`), and performance/leak guards (`performance.scm`).
+(`tests/c/test_primitives.c`), Landlock ABI/path enforcement, inherited-secret
+descriptor closure plus explicit descriptor delegation, strict cgroup abort
+and child reaping, and performance/leak guards (`performance.scm`).
 The C library builds warning-clean under `-Wall -Wextra -Werror` with FORTIFY,
 stack-protector/clash protection, full RELRO, a non-executable stack and
 CF-protection.
