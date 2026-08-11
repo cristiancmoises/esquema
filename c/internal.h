@@ -20,6 +20,7 @@ enum {
     ES_EXIT_PARENT_ABORT = 98,
     ES_EXIT_LANDLOCK = 99,
     ES_EXIT_FDS     = 100,
+    ES_EXIT_RLIMIT  = 101,
     ES_EXIT_EXEC    = 127
 };
 
@@ -80,6 +81,9 @@ struct esquema_config {
     long cpu_quota_us;        /* <=0 unset */
     long cpu_period_us;       /* default 100000 */
     char *cgroup_name;
+
+    uint32_t open_files_max;  /* valid iff has_open_files_max */
+    int has_open_files_max;
 };
 
 /* ---- seccomp (compile in parent, apply in child) --------------------- */
@@ -88,6 +92,10 @@ struct esquema_config {
  * caller must free with es_seccomp_free_program). Returns 0 / -1. */
 int  es_seccomp_compile(const esquema_seccomp_policy *policy,
                         struct sock_fprog *out);
+/* Strict payload variant: additionally kills setrlimit and mutating
+ * prlimit64 calls so a payload cannot change its broker-installed contract. */
+int  es_seccomp_compile_strict(const esquema_seccomp_policy *policy,
+                               struct sock_fprog *out);
 /* Build the small stacked TTY-injection (TIOCSTI/TIOCLINUX) kill filter.
  * Apply this BEFORE the main filter in the child. */
 int  es_seccomp_compile_tty(struct sock_fprog *out);
@@ -126,6 +134,10 @@ int es_landlock_restrict_root(const char *path);
  * on preserved descriptors so an explicitly delegated channel reaches the
  * payload.  Uses close_range with a raw /proc/self/fd fallback. */
 int es_close_inherited_fds(const struct esquema_config *cfg);
+
+/* Install and read back a configured RLIMIT_NOFILE with raw Linux syscalls.
+ * This is allocation-free and is called in the post-fork payload child. */
+int es_apply_nofile_limit(const struct esquema_config *cfg);
 
 /* ---- PID-1 supervision / lifecycle bookkeeping ---------------------- */
 

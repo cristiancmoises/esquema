@@ -25,6 +25,32 @@
 (test-assert "F1c version looks like 0.x" (string-prefix? "0." (esquema-version)))
 (test-assert "F1d namespaces->mask maps all seven bits"
              (= NS-ALL (namespaces->mask '(user mount pid uts ipc net cgroup))))
+(let ((legacy (make-limits #f #f #f #f))
+      (v1 (make-limits-v1 #f #f #f #f 32)))
+  (test-eqv "F1e legacy limits constructor keeps RLIMIT_NOFILE unset"
+            #f (limits-open-files-max legacy))
+  (test-eqv "F1f v1 limits constructor carries RLIMIT_NOFILE"
+            32 (limits-open-files-max v1)))
+(test-assert "F1g v1 limits reject an out-of-range RLIMIT_NOFILE"
+  (catch #t
+    (lambda () (make-limits-v1 #f #f #f #f 15) #f)
+    (lambda _ #t)))
+(test-assert "F1h strict Scheme policy requires a v1 RLIMIT_NOFILE"
+  (catch #t
+    (lambda ()
+      (make-container "strict-no-nofile" rootfs (list "/bin/sh")
+                      #:strict? #t
+                      #:limits (make-limits 4096 #f #f #f))
+      #f)
+    (lambda _ #t)))
+(test-assert "F1i preserved descriptors must be below RLIMIT_NOFILE"
+  (catch #t
+    (lambda ()
+      (make-container "bad-preserved-fd" rootfs (list "/bin/sh")
+                      #:limits (make-limits-v1 #f #f #f #f 32)
+                      #:preserve-fds '(32))
+      #f)
+    (lambda _ #t)))
 
 ;; ---- F2: payload runs, status propagates --------------------------------
 (call-with-values

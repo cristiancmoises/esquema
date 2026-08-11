@@ -80,6 +80,7 @@
                      (teardown-timeout-ms 2000)
                      (env '(("PATH" . "/bin")))
                      (mounts '())
+                     (limits #f)
                      (preserve-fds '()))
   (let* ((outfile "/esq-out")
          (wrapped (string-append "( " script " ) > " outfile " 2>&1"))
@@ -95,6 +96,7 @@
                             #:teardown-timeout-ms teardown-timeout-ms
                             #:env env
                             #:mounts mounts
+                            #:limits limits
                             #:preserve-fds preserve-fds))
          (rc (with-sandbox c))
          (out (file-content (string-append rootfs outfile))))
@@ -122,6 +124,7 @@
                      (teardown-timeout-ms 2000)
                      (env '(("PATH" . "/bin")))
                      (mounts '())
+                     (limits #f)
                      (preserve-fds '()))
   (with-sandbox
    (make-container "test" rootfs (list "/bin/sh" "-c" script)
@@ -136,4 +139,5 @@
                    #:teardown-timeout-ms teardown-timeout-ms
                    #:env env
                    #:mounts mounts
+                   #:limits limits
                    #:preserve-fds preserve-fds)))

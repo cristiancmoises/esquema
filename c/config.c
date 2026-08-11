@@ -77,6 +77,8 @@ esquema_config *esquema_config_new(void)
     c->pids_max      = -1;
     c->cpu_quota_us  = -1;
     c->cpu_period_us = 100000;
+    c->open_files_max = 0;
+    c->has_open_files_max = 0;
     return c;
 }
 
@@ -153,6 +155,11 @@ int esquema_config_add_bind(esquema_config *cfg, const char *src,
 int esquema_config_preserve_fd(esquema_config *cfg, int fd)
 {
     if (!cfg || fd < 3) { errno = EINVAL; return es_fail("preserve_fd"); }
+    if (cfg->has_open_files_max &&
+        (uint32_t) fd >= cfg->open_files_max) {
+        errno = ERANGE;
+        return es_fail("preserve_fd: at or above open-files limit");
+    }
     if (fcntl(fd, F_GETFD) < 0) return es_fail("preserve_fd: not open");
 
     size_t pos = 0;
@@ -279,4 +286,27 @@ int esquema_config_set_cgroup_name(esquema_config *cfg, const char *name)
 {
     if (!cfg || !name) { errno = EINVAL; return es_fail("set_cgroup_name"); }
     return set_field(&cfg->cgroup_name, name);
+}
+
+int esquema_config_set_open_files_max(esquema_config *cfg,
+                                      uint32_t open_files_max)
+{
+    if (!cfg) {
+        errno = EINVAL;
+        return es_fail("set_open_files_max");
+    }
+    if (open_files_max < ESQUEMA_OPEN_FILES_MIN ||
+        open_files_max > ESQUEMA_OPEN_FILES_MAX) {
+        errno = ERANGE;
+        return es_fail("set_open_files_max");
+    }
+    for (size_t i = 0; i < cfg->preserve_fds_n; i++) {
+        if ((uint32_t) cfg->preserve_fds[i] >= open_files_max) {
+            errno = ERANGE;
+            return es_fail("set_open_files_max: preserved descriptor");
+        }
+    }
+    cfg->open_files_max = open_files_max;
+    cfg->has_open_files_max = 1;
+    return 0;
 }

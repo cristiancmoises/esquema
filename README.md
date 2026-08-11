@@ -46,7 +46,16 @@ async-signal-safe C between `fork` and `execve`:
    delegation. Opt-in `#:strict? #t` mode installs and reads back every
    requested `memory.max`, `pids.max`, and `cpu.max` value before releasing the
    payload, and aborts cleanly if delegation or verification fails.
-9. **Race-resistant bind attachment** — destinations must be relative and may
+9. **Bounded open-file table** — the version-1 resource policy sets and reads
+   back both halves of `RLIMIT_NOFILE` before seccomp and payload execution.
+   Values are limited to 16..1048576, and a preserved descriptor at or above
+   the bound is rejected. Strict seccomp then kills `setrlimit` and mutating
+   `prlimit64` calls while retaining query-only `prlimit64`; the installed hard
+   limit independently prevents a raise. On the supported x86-64 and AArch64
+   ABIs, the post-fork path uses an allocation-free inline Linux `prlimit64`
+   system call rather than a libc wrapper. It fails closed if that operation,
+   its architecture implementation, or its readback is unavailable.
+10. **Race-resistant bind attachment** — destinations must be relative and may
    not contain empty, `.` or `..` components. They are resolved beneath a
    pinned root with `openat2` (`RESOLVE_BENEATH`, `NO_SYMLINKS`,
    `NO_MAGICLINKS`) or a component-by-component fd walk. On modern kernels,
@@ -58,7 +67,7 @@ async-signal-safe C between `fork` and `execve`:
    legacy single-mount remount as equivalent, because that fallback can leave
    nested mounts writable. Compatibility mode may use that documented,
    weaker fallback when the recursive API is unavailable.
-10. **PID-1 supervision** — Fortress uses a minimal supervisor which forwards
+11. **PID-1 supervision** — Fortress uses a minimal supervisor which forwards
     lifecycle signals to the payload process group, adopts and reaps orphaned
     descendants, and escalates from `TERM` to `KILL` after a bounded timeout.
     The launcher does not return a cell pid until its host-side signal relay is
@@ -143,6 +152,13 @@ The positional `(container name rootfs command)` constructor and configurations
 without `#:seccomp-policy` retain the legacy seccomp behavior for API
 compatibility. That compatibility policy is not accepted as a Fortress policy.
 
+The original four-argument `(make-limits memory pids quota period)` constructor
+also remains source-compatible and leaves `RLIMIT_NOFILE` unmanaged. New policy
+code uses `(make-limits-v1 memory pids quota period open-files-max)`. Direct C
+callers use `esquema_config_set_open_files_max`; its stable input is a `uint32_t`
+in `ESQUEMA_OPEN_FILES_MIN..ESQUEMA_OPEN_FILES_MAX`. An explicitly configured
+limit is always enforced, while omission changes no legacy non-strict launch.
+
 Landlock is defence in depth, not a complete filesystem monitor. It does not
 mediate reads and writes on files opened before restriction, and Linux does
 not currently mediate every metadata operation (for example all `chmod`,
@@ -151,12 +167,13 @@ known to the Linux UAPI headers used for the build; a higher runtime ABI does
 not justify claiming coverage for rights unknown to those headers.
 
 Fortress callers must additionally select `#:strict? #t`, provide at least one
-cgroup limit, and leave all namespaces, seccomp, capability dropping, and
-Landlock enabled. The Scheme constructor automatically supplies the typed
-Fortress seccomp policy and enables PID-1 supervision for strict cells. Direct
-C callers must set both explicitly. Strict mode deliberately fails when the
-host has not delegated the requested cgroup controllers; it never silently
-converts a
+cgroup limit plus a version-1 open-files limit, and leave all namespaces,
+seccomp, capability dropping, and Landlock enabled. The Scheme constructor
+automatically supplies the typed Fortress seccomp policy and enables PID-1
+supervision for strict cells. Direct C callers must set the typed seccomp
+policy, supervisor, and open-files limit explicitly. Strict mode deliberately
+fails when the host has not delegated the requested cgroup controllers; it
+never silently converts a
 mandatory limit into best-effort operation. The legacy constructor and its
 best-effort cgroup behavior remain available for compatibility, but are not a
 Fortress boundary.
@@ -260,7 +277,8 @@ isolation and escape attempts with positive+negative controls
 (`security.scm`), C-level enforcement including the seccomp `SIGSYS` kill
 (`tests/c/test_primitives.c`), Landlock ABI/path enforcement, inherited-secret
 descriptor closure plus explicit descriptor delegation, strict cgroup abort
-and child reaping, typed seccomp architecture/socket/`io_uring`/ioctl policy,
+and child reaping, bounded and read-back `RLIMIT_NOFILE`, attempted limit raises,
+typed seccomp architecture/socket/`io_uring`/ioctl policy,
 symlink and magiclink bind attacks, supervisor signal/timeout behavior, orphan
 reaping, 72 concurrent launches, and performance/leak guards
 (`performance.scm`).

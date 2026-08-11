@@ -273,6 +273,17 @@
           (run-status rootfs "exit 0"
                       #:seccomp-policy (fortress-seccomp-policy)))
 
+;; ---- S12b: policy-supplied RLIMIT_NOFILE reaches the real payload -------
+;; Compatibility seccomp deliberately retains setrlimit/prlimit64.  The
+;; installed hard value independently prevents a raise; strict payloads also
+;; receive a seccomp kill rule, covered by the C primitive suite.
+(test-eqv "S12b RLIMIT_NOFILE is read back and an attempted raise fails"
+          0
+          (run-status
+           rootfs
+           "[ \"$(ulimit -n)\" = 32 ] || exit 21; ulimit -n 33 2>/dev/null && exit 22; [ \"$(ulimit -n)\" = 32 ]"
+           #:limits (make-limits-v1 #f #f #f #f 32)))
+
 ;; ---- S13: PID-1 supervision and bounded teardown ----------------------
 (let* ((ready (string-append rootfs "/signal-ready"))
        (seen (string-append rootfs "/signal-seen"))

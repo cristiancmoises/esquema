@@ -52,6 +52,11 @@
   (with-sandbox
    (make-container "perf" rootfs (list "/bin/sh" "-c" "exit 0"))))
 
+(define (spawn-esquema-nofile)
+  (with-sandbox
+   (make-container "perf-nofile" rootfs (list "/bin/sh" "-c" "exit 0")
+                   #:limits (make-limits-v1 #f #f #f #f 32))))
+
 ;; Raw fork+exec of the same static shell, no isolation (baseline).
 (define (spawn-raw)
   (let ((pid (primitive-fork)))
@@ -62,6 +67,8 @@
 (format #t "~%Startup latency:~%")
 (define raw-mean     (bench "raw fork+exec (no isolation)" 30 spawn-raw))
 (define esq-mean     (bench "esquema full-isolation container" 30 spawn-esquema))
+(define nofile-mean  (bench "esquema + RLIMIT_NOFILE readback" 30
+                            spawn-esquema-nofile))
 (define overhead     (- esq-mean raw-mean))
 (format #t "  isolation overhead: ~,2fms per launch~%" overhead)
 (format #t "  throughput: ~,1f containers/sec~%" (/ 1000.0 esq-mean))
@@ -70,15 +77,17 @@
 (test-assert "P1 esquema startup mean < 500ms" (< esq-mean 500.0))
 ;; P2: overhead over raw exec is bounded.
 (test-assert "P2 isolation overhead < 400ms" (< overhead 400.0))
+(test-assert "P3 RLIMIT_NOFILE path remains below 2x Esquema baseline"
+             (< nofile-mean (* 2.0 esq-mean)))
 
-;; P3: no resident-memory growth across many launches (leak guard on the
+;; P4: no resident-memory growth across many launches (leak guard on the
 ;; config/FFI path).
 (define rss-before (self-rss-kb))
 (for-each (lambda (_) (spawn-esquema)) (iota 60))
 (define rss-after (self-rss-kb))
 (format #t "~%Leak guard: RSS ~akB -> ~akB (delta ~akB over 60 launches)~%"
         rss-before rss-after (- rss-after rss-before))
-(test-assert "P3 launcher RSS growth < 8MB over 60 launches"
+(test-assert "P4 launcher RSS growth < 8MB over 60 launches"
              (< (- rss-after rss-before) 8192))
 
 (remove-rootfs rootfs)

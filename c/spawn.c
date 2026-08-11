@@ -49,7 +49,8 @@ static int strict_config_ok(const esquema_config *cfg)
 {
     if (!cfg->strict) return 1;
     if (!cfg->seccomp || !cfg->drop_caps || !cfg->landlock ||
-        !cfg->supervise || !cfg->has_seccomp_policy)
+        !cfg->supervise || !cfg->has_seccomp_policy ||
+        !cfg->has_open_files_max)
         return 0;
     if (cfg->seccomp_policy.ioctl_policy == ESQUEMA_IOCTL_LEGACY) return 0;
     if ((cfg->ns_mask & ESQUEMA_NS_ALL) != ESQUEMA_NS_ALL) return 0;
@@ -120,7 +121,10 @@ pid_t esquema_spawn(esquema_config *cfg)
         }
         const esquema_seccomp_policy *policy =
             cfg->has_seccomp_policy ? &cfg->seccomp_policy : NULL;
-        if (es_seccomp_compile(policy, &prog) < 0) {
+        int seccomp_rc = cfg->strict
+            ? es_seccomp_compile_strict(policy, &prog)
+            : es_seccomp_compile(policy, &prog);
+        if (seccomp_rc < 0) {
             es_seccomp_free_program(&prog_tty);
             close(rootfs_fd);
             return -1;
@@ -217,6 +221,7 @@ pid_t esquema_spawn(esquema_config *cfg)
                 _exit(ES_EXIT_LANDLOCK);
 
             if (es_close_inherited_fds(cfg) < 0) _exit(ES_EXIT_FDS);
+            if (es_apply_nofile_limit(cfg) < 0) _exit(ES_EXIT_RLIMIT);
 
             if (have_seccomp) {
                 /* TTY-injection killer first (default-allow), then the main

@@ -19,6 +19,7 @@
 #include <sched.h>
 #include <sys/wait.h>
 #include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/syscall.h>
 #include <sys/ioctl.h>
 #include <sys/mount.h>
@@ -152,6 +153,100 @@ static void child_policy_denied_ptrace(void)
     if (esquema_apply_seccomp_policy(&policy) < 0) _exit(50);
     syscall(SYS_ptrace, 0, 0, 0, 0);
     _exit(0);
+}
+
+static int apply_strict_seccomp(void)
+{
+    esquema_seccomp_policy policy;
+    esquema_seccomp_policy_init(&policy);
+    struct sock_fprog program = { 0, NULL };
+    if (es_seccomp_compile_strict(&policy, &program) < 0) return -1;
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0) {
+        es_seccomp_free_program(&program);
+        return -1;
+    }
+    if (es_seccomp_apply_program(&program) < 0) {
+        es_seccomp_free_program(&program);
+        return -1;
+    }
+    es_seccomp_free_program(&program);
+    return 0;
+}
+
+#ifdef SYS_prlimit64
+static void child_strict_prlimit_denied(void)
+{
+    if (apply_strict_seccomp() < 0) _exit(50);
+    struct rlimit limit = { 17, 17 };
+    syscall(SYS_prlimit64, 0, RLIMIT_NOFILE, &limit, NULL);
+    _exit(0);
+}
+
+
+static void child_strict_prlimit_query_allowed(void)
+{
+    if (apply_strict_seccomp() < 0) _exit(50);
+    struct rlimit limit;
+    if (syscall(SYS_prlimit64, 0, RLIMIT_NOFILE, NULL, &limit) < 0)
+        _exit(87);
+    _exit(0);
+}
+#endif
+
+#ifdef SYS_setrlimit
+static void child_strict_setrlimit_denied(void)
+{
+    if (apply_strict_seccomp() < 0) _exit(50);
+    struct rlimit limit = { 16, 16 };
+    syscall(SYS_setrlimit, RLIMIT_NOFILE, &limit);
+    _exit(0);
+}
+#endif
+
+static void child_compat_rlimit_available(void)
+{
+    if (esquema_apply_seccomp() < 0) _exit(50);
+    struct rlimit limit;
+#ifdef SYS_prlimit64
+    if (syscall(SYS_prlimit64, 0, RLIMIT_NOFILE, NULL, &limit) < 0)
+        _exit(86);
+#else
+    if (getrlimit(RLIMIT_NOFILE, &limit) < 0) _exit(86);
+#endif
+    _exit(0);
+}
+
+static void child_nofile_enforced(void)
+{
+    esquema_config *cfg = esquema_config_new();
+    if (!cfg || esquema_config_set_open_files_max(cfg, 16) < 0)
+        _exit(70);
+    if (es_apply_nofile_limit(cfg) < 0) _exit(71);
+
+    struct rlimit observed;
+    if (getrlimit(RLIMIT_NOFILE, &observed) < 0 ||
+        observed.rlim_cur != 16 || observed.rlim_max != 16)
+        _exit(72);
+    struct rlimit raised = { 17, 17 };
+    errno = 0;
+    if (setrlimit(RLIMIT_NOFILE, &raised) != -1 || errno != EPERM)
+        _exit(73);
+    esquema_config_free(cfg);
+    _exit(0);
+}
+
+static void child_nofile_unenforceable(void)
+{
+    struct rlimit inherited = { 16, 16 };
+    if (setrlimit(RLIMIT_NOFILE, &inherited) < 0) _exit(70);
+    esquema_config *cfg = esquema_config_new();
+    if (!cfg || esquema_config_set_open_files_max(cfg, 17) < 0)
+        _exit(71);
+    errno = 0;
+    int rc = es_apply_nofile_limit(cfg);
+    int saved = errno;
+    esquema_config_free(cfg);
+    _exit(rc == -1 && saved == EPERM ? 0 : 72);
 }
 
 #ifdef SYS_io_uring_setup
@@ -503,6 +598,7 @@ static int test_strict_cgroup_failure(int *clean_teardown)
         esquema_config_add_arg(cfg, "/bin/false") == 0 &&
         esquema_config_set_cgroup_name(cfg, "invalid/name") == 0 &&
         esquema_config_set_seccomp_policy(cfg, &policy) == 0 &&
+        esquema_config_set_open_files_max(cfg, 64) == 0 &&
         esquema_config_set_supervisor(cfg, 1, 100) == 0;
     esquema_config_set_memory_max(cfg, 4096);
     esquema_config_set_strict(cfg, 1);
@@ -514,6 +610,26 @@ static int test_strict_cgroup_failure(int *clean_teardown)
     int st = 0;
     pid_t leftover = waitpid(-1, &st, WNOHANG);
     *clean_teardown = leftover == -1 && errno == ECHILD;
+    return pid == -1 && saved == EINVAL;
+}
+
+static int test_strict_missing_nofile(void)
+{
+    esquema_config *cfg = esquema_config_new();
+    if (!cfg) return 0;
+    esquema_seccomp_policy policy;
+    esquema_seccomp_policy_init(&policy);
+    int configured =
+        esquema_config_set_rootfs(cfg, "/") == 0 &&
+        esquema_config_add_arg(cfg, "/bin/false") == 0 &&
+        esquema_config_set_cgroup_name(cfg, "strict-missing-nofile") == 0 &&
+        esquema_config_set_seccomp_policy(cfg, &policy) == 0 &&
+        esquema_config_set_supervisor(cfg, 1, 100) == 0;
+    esquema_config_set_memory_max(cfg, 4096);
+    esquema_config_set_strict(cfg, 1);
+    pid_t pid = configured ? esquema_spawn(cfg) : -2;
+    int saved = esquema_errno();
+    esquema_config_free(cfg);
     return pid == -1 && saved == EINVAL;
 }
 
@@ -592,6 +708,46 @@ int main(void)
     printf("BLOCKED seccomp v1 io_uring test: SYS_io_uring_setup unavailable\n");
 #endif
 
+    /* ---- RLIMIT_NOFILE contract + strict post-installation lock ---- */
+    {
+        int st = run_child(child_nofile_enforced);
+        check("RLIMIT_NOFILE: soft+hard values are installed and cannot be raised",
+              WIFEXITED(st) && WEXITSTATUS(st) == 0);
+    }
+    {
+        int st = run_child(child_nofile_unenforceable);
+        check("RLIMIT_NOFILE: unenforceable policy value fails closed",
+              WIFEXITED(st) && WEXITSTATUS(st) == 0);
+    }
+    {
+        int st = run_child(child_compat_rlimit_available);
+        check("RLIMIT_NOFILE: compatibility seccomp retains resource-limit API",
+              WIFEXITED(st) && WEXITSTATUS(st) == 0);
+    }
+#ifdef SYS_prlimit64
+    {
+        int st = run_child(child_strict_prlimit_denied);
+        check("strict seccomp: mutating prlimit64 is killed after policy installation",
+              WIFSIGNALED(st) && WTERMSIG(st) == SIGSYS);
+    }
+    {
+        int st = run_child(child_strict_prlimit_query_allowed);
+        check("strict seccomp: query-only prlimit64 remains available",
+              WIFEXITED(st) && WEXITSTATUS(st) == 0);
+    }
+#else
+    printf("BLOCKED strict prlimit64 test: SYS_prlimit64 unavailable\n");
+#endif
+#ifdef SYS_setrlimit
+    {
+        int st = run_child(child_strict_setrlimit_denied);
+        check("strict seccomp: setrlimit is killed after policy installation",
+              WIFSIGNALED(st) && WTERMSIG(st) == SIGSYS);
+    }
+#else
+    printf("BLOCKED strict setrlimit test: SYS_setrlimit unavailable\n");
+#endif
+
     /* ---- capability drop ---- */
     {
         int st = run_child(child_dropcaps);
@@ -642,6 +798,8 @@ int main(void)
     /* ---- strict cgroup failure and abort cleanup ---- */
     {
         int clean = 0;
+        check("strict mode: missing open-files limit fails before launch",
+              test_strict_missing_nofile());
         check("strict mode: cgroup setup failure aborts launch",
               test_strict_cgroup_failure(&clean));
         check("strict mode: aborted setup child is synchronously reaped", clean);
@@ -664,6 +822,23 @@ int main(void)
               cfg && esquema_config_add_bind(cfg, "/tmp", "tmp/../escape", 1) == -1);
         check("bind destination rejects empty path segments",
               cfg && esquema_config_add_bind(cfg, "/tmp", "tmp//escape", 1) == -1);
+        check("open-files limit rejects values below 16",
+              cfg && esquema_config_set_open_files_max(cfg, 15) == -1 &&
+              esquema_errno() == ERANGE);
+        check("open-files limit rejects values above 1048576",
+              cfg && esquema_config_set_open_files_max(cfg, 1048577) == -1 &&
+              esquema_errno() == ERANGE);
+        int source_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+        int high_fd = source_fd < 0 ? -1
+                                    : fcntl(source_fd, F_DUPFD_CLOEXEC, 32);
+        check("open-files limit rejects an already-preserved descriptor at its bound",
+              cfg && high_fd >= 32 &&
+              esquema_config_preserve_fd(cfg, high_fd) == 0 &&
+              esquema_config_set_open_files_max(cfg,
+                                                 (uint32_t) high_fd) == -1 &&
+              esquema_errno() == ERANGE);
+        if (high_fd >= 0) close(high_fd);
+        if (source_fd >= 0) close(source_fd);
         esquema_seccomp_policy policy;
         esquema_seccomp_policy_init(&policy);
         policy.version++;
@@ -681,6 +856,20 @@ int main(void)
         policy.reserved[0] = 1;
         check("seccomp policy rejects nonzero reserved fields",
               cfg && esquema_config_set_seccomp_policy(cfg, &policy) == -1);
+        esquema_config_free(cfg);
+    }
+    {
+        esquema_config *cfg = esquema_config_new();
+        int source_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+        int high_fd = source_fd < 0 ? -1
+                                    : fcntl(source_fd, F_DUPFD_CLOEXEC, 16);
+        check("preserve_fd rejects a descriptor at an existing open-files bound",
+              cfg && high_fd >= 16 &&
+              esquema_config_set_open_files_max(cfg, 16) == 0 &&
+              esquema_config_preserve_fd(cfg, high_fd) == -1 &&
+              esquema_errno() == ERANGE);
+        if (high_fd >= 0) close(high_fd);
+        if (source_fd >= 0) close(source_fd);
         esquema_config_free(cfg);
     }
     check("lifecycle registry tracks and removes more than 64 launches",

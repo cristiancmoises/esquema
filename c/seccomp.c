@@ -81,7 +81,7 @@ static const char *const ALLOW[] = {
     /* time / rng / info */
     "clock_gettime", "clock_getres", "clock_nanosleep", "nanosleep",
     "gettimeofday", "getrandom", "uname", "sysinfo", "getrusage",
-    "times", "getrlimit", "setrlimit", "prlimit64",
+    "times", "getrlimit",
     "timerfd_create", "timerfd_settime", "timerfd_gettime",
     "timer_create", "timer_settime", "timer_gettime", "timer_delete",
     /* identity (in-namespace only) */
@@ -144,6 +144,27 @@ static int add_kill_name(scmp_filter_ctx ctx, const char *name)
     int syscall_nr = seccomp_syscall_resolve_name(name);
     if (syscall_nr == __NR_SCMP_ERROR) return 0;
     int rc = seccomp_rule_add(ctx, SCMP_ACT_KILL_PROCESS, syscall_nr, 0);
+    if (rc < 0 && rc != -EEXIST) { errno = -rc; return -1; }
+    return 0;
+}
+
+static int add_strict_resource_limit_rules(scmp_filter_ctx ctx)
+{
+    if (add_kill_name(ctx, "setrlimit") < 0) return -1;
+
+    int prlimit = seccomp_syscall_resolve_name("prlimit64");
+    if (prlimit == __NR_SCMP_ERROR) return 0;
+    /* prlimit64(pid, resource, new_limit, old_limit): allow an ordinary
+     * query, but kill any attempt to supply a replacement limit. */
+    struct scmp_arg_cmp query = {
+        .arg = 2, .op = SCMP_CMP_EQ, .datum_a = 0, .datum_b = 0
+    };
+    struct scmp_arg_cmp mutation = {
+        .arg = 2, .op = SCMP_CMP_NE, .datum_a = 0, .datum_b = 0
+    };
+    int rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, prlimit, 1, query);
+    if (rc < 0 && rc != -EEXIST) { errno = -rc; return -1; }
+    rc = seccomp_rule_add(ctx, SCMP_ACT_KILL_PROCESS, prlimit, 1, mutation);
     if (rc < 0 && rc != -EEXIST) { errno = -rc; return -1; }
     return 0;
 }
@@ -245,7 +266,8 @@ static int add_policy_ioctls(scmp_filter_ctx ctx,
 
 /* Populate ctx with the deny-set, allow-set and BADARCH policy. */
 static int build_main_rules(scmp_filter_ctx ctx,
-                            const esquema_seccomp_policy *policy)
+                            const esquema_seccomp_policy *policy,
+                            int strict_payload)
 {
     int rc = seccomp_attr_set(ctx, SCMP_FLTATR_ACT_BADARCH,
                               SCMP_ACT_KILL_PROCESS);
@@ -263,6 +285,16 @@ static int build_main_rules(scmp_filter_ctx ctx,
         rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, s, 0);
         /* EEXIST: name already covered by an alias — not fatal. */
         if (rc < 0 && rc != -EEXIST) { errno = -rc; return -1; }
+    }
+    /* Compatibility callers historically had both resource-limit syscalls.
+     * A strict payload instead receives a hard kill rule: Esquema has already
+     * installed and read back its signed RLIMIT_NOFILE contract, and the
+     * payload has no reason to mutate process limits afterward. */
+    if (strict_payload) {
+        if (add_strict_resource_limit_rules(ctx) < 0) return -1;
+    } else if (add_allow_name(ctx, "setrlimit") < 0 ||
+               add_allow_name(ctx, "prlimit64") < 0) {
+        return -1;
     }
     if (add_policy_sockets(ctx, policy) < 0 ||
         add_policy_io_uring(ctx, policy) < 0 ||
@@ -377,7 +409,7 @@ int esquema_apply_seccomp_policy(const esquema_seccomp_policy *policy)
 
     scmp_filter_ctx ctx = seccomp_init(SCMP_ACT_ERRNO(ENOSYS));
     if (!ctx) { errno = ENOMEM; return es_fail("seccomp: init"); }
-    if (build_main_rules(ctx, policy) < 0 || load_ctx(ctx) < 0) {
+    if (build_main_rules(ctx, policy, 0) < 0 || load_ctx(ctx) < 0) {
         seccomp_release(ctx); return es_fail("seccomp: main");
     }
     seccomp_release(ctx);
@@ -385,19 +417,36 @@ int esquema_apply_seccomp_policy(const esquema_seccomp_policy *policy)
 }
 
 /* ---- compile in parent, apply in child ------------------------------- */
+static int es_seccomp_compile_mode(const esquema_seccomp_policy *policy,
+                                   int strict_payload,
+                                   struct sock_fprog *out);
+
 int es_seccomp_compile(const esquema_seccomp_policy *policy,
                        struct sock_fprog *out)
+{
+    return es_seccomp_compile_mode(policy, 0, out);
+}
+
+static int es_seccomp_compile_mode(const esquema_seccomp_policy *policy,
+                                   int strict_payload,
+                                   struct sock_fprog *out)
 {
     if (validate_policy_arch(policy) < 0)
         return es_fail("seccomp: policy architecture");
     scmp_filter_ctx ctx = seccomp_init(SCMP_ACT_ERRNO(ENOSYS));
     if (!ctx) { errno = ENOMEM; return es_fail("seccomp: init"); }
-    if (build_main_rules(ctx, policy) < 0) {
+    if (build_main_rules(ctx, policy, strict_payload) < 0) {
         seccomp_release(ctx); return es_fail("seccomp: rules");
     }
     int rc = export_ctx(ctx, out);
     seccomp_release(ctx);
     return rc;
+}
+
+int es_seccomp_compile_strict(const esquema_seccomp_policy *policy,
+                              struct sock_fprog *out)
+{
+    return es_seccomp_compile_mode(policy, 1, out);
 }
 
 int es_seccomp_compile_tty(struct sock_fprog *out)

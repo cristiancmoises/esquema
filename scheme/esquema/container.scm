@@ -25,11 +25,13 @@
             container-cgroup-name
             container-limits
             make-limits
+            make-limits-v1
             limits?
             limits-memory-max
             limits-pids-max
             limits-cpu-quota
             limits-cpu-period
+            limits-open-files-max
             make-seccomp-policy
             seccomp-policy?
             seccomp-policy-expected-arch
@@ -52,13 +54,27 @@
   (make-seccomp-policy 'native '(unix inet inet6) 'deny 'restricted))
 
 ;;; Resource limits (all #f = unset). cpu-quota/period are microseconds.
+;;; Keep the original four-argument constructor stable; the v1 constructor is
+;;; additive and carries the policy-supplied RLIMIT_NOFILE value.
 (define-record-type <limits>
-  (make-limits memory-max pids-max cpu-quota cpu-period)
+  (%make-limits memory-max pids-max cpu-quota cpu-period open-files-max)
   limits?
   (memory-max limits-memory-max)
   (pids-max   limits-pids-max)
   (cpu-quota  limits-cpu-quota)
-  (cpu-period limits-cpu-period))
+  (cpu-period limits-cpu-period)
+  (open-files-max limits-open-files-max))
+
+(define (make-limits memory-max pids-max cpu-quota cpu-period)
+  (%make-limits memory-max pids-max cpu-quota cpu-period #f))
+
+(define (make-limits-v1 memory-max pids-max cpu-quota cpu-period
+                        open-files-max)
+  (unless (and (integer? open-files-max)
+               (<= 16 open-files-max 1048576))
+    (error "limits v1: open-files-max must be 16..1048576"
+           open-files-max))
+  (%make-limits memory-max pids-max cpu-quota cpu-period open-files-max))
 
 (define-record-type <container>
   (%make-container name rootfs command env mounts namespaces hostname
@@ -120,6 +136,17 @@
                (<= 1 teardown-timeout-ms 60000))
     (error "container: teardown timeout must be 1..60000 ms"
            teardown-timeout-ms))
+  (when (and strict?
+             (or (not (limits? limits))
+                 (not (limits-open-files-max limits))))
+    (error "container: strict mode requires a v1 open-files limit"
+           limits))
+  (when (and (limits? limits) (limits-open-files-max limits)
+             (any (lambda (fd)
+                    (>= fd (limits-open-files-max limits)))
+                  preserve-fds))
+    (error "container: preserved descriptor reaches open-files limit"
+           preserve-fds (limits-open-files-max limits)))
   (let ((effective-policy
          (or seccomp-policy (and strict? (fortress-seccomp-policy)))))
     (%make-container name rootfs command env mounts namespaces hostname

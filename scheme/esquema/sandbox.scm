@@ -115,6 +115,10 @@
                  (esquema-config-set-cgroup-name
                   cfg (or cg (container-name c))))
         (when lim
+          (when (limits-open-files-max lim)
+            (checked "open-files limit"
+                     (esquema-config-set-open-files-max
+                      cfg (limits-open-files-max lim))))
           (when (limits-memory-max lim)
             (esquema-config-set-memory-max cfg (limits-memory-max lim)))
           (when (limits-pids-max lim)

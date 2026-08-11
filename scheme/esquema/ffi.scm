@@ -33,6 +33,7 @@
             esquema-config-set-pids-max
             esquema-config-set-cpu-max
             esquema-config-set-cgroup-name
+            esquema-config-set-open-files-max
             esquema-spawn
             esquema-wait
             esquema-apply-seccomp
@@ -114,6 +115,8 @@
 (define %cfg-pids       (c-fn "esquema_config_set_pids_max" void (list '* long)))
 (define %cfg-cpu        (c-fn "esquema_config_set_cpu_max" void (list '* long long)))
 (define %cfg-cgname     (c-fn "esquema_config_set_cgroup_name" int (list '* '*)))
+(define %cfg-open-files (c-fn "esquema_config_set_open_files_max" int
+                              (list '* unsigned-int)))
 
 (define (esquema-config-new) (%cfg-new))
 (define (esquema-config-free c) (%cfg-free c))
@@ -139,6 +142,7 @@
 (define (esquema-config-set-pids-max c n) (%cfg-pids c n))
 (define (esquema-config-set-cpu-max c q p) (%cfg-cpu c q p))
 (define (esquema-config-set-cgroup-name c s) (%cfg-cgname c (->cstr s)))
+(define (esquema-config-set-open-files-max c n) (%cfg-open-files c n))
 
 ;;; ---- lifecycle ------------------------------------------------------
 (define %spawn (c-fn "esquema_spawn" int (list '*)))

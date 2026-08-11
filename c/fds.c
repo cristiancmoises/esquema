@@ -24,6 +24,80 @@ struct es_linux_dirent64 {
     char           d_name[];
 };
 
+/* Linux's prlimit64 operation is needed after fork and before exec.  Calling
+ * it directly avoids relying on a libc wrapper that POSIX does not promise is
+ * async-signal-safe.  Esquema's versioned seccomp ABI supports x86-64 and
+ * AArch64; an explicitly configured limit fails closed with ENOSYS elsewhere. */
+static long raw_syscall4(long number, long arg0, long arg1, long arg2,
+                         long arg3)
+{
+#if defined(__CPPCHECK__)
+    /* Static analyzers cannot model architecture register bindings. */
+    (void) number;
+    (void) arg0;
+    (void) arg1;
+    (void) arg2;
+    (void) arg3;
+    return -ENOSYS;
+#elif defined(__x86_64__) && !defined(__ILP32__)
+    register long r10 __asm__("r10") = arg3;
+    long result;
+    __asm__ volatile("syscall"
+                     : "=a" (result)
+                     : "a" (number), "D" (arg0), "S" (arg1), "d" (arg2),
+                       "r" (r10)
+                     : "rcx", "r11", "memory");
+    return result;
+#elif defined(__aarch64__)
+    long result;
+    __asm__ volatile("mov x8, %1\n\t"
+                     "mov x0, %2\n\t"
+                     "mov x1, %3\n\t"
+                     "mov x2, %4\n\t"
+                     "mov x3, %5\n\t"
+                     "svc #0\n\t"
+                     "mov %0, x0"
+                     : "=r" (result)
+                     : "r" (number), "r" (arg0), "r" (arg1), "r" (arg2),
+                       "r" (arg3)
+                     : "x0", "x1", "x2", "x3", "x8", "memory", "cc");
+    return result;
+#else
+    (void) number;
+    (void) arg0;
+    (void) arg1;
+    (void) arg2;
+    (void) arg3;
+    return -ENOSYS;
+#endif
+}
+
+static int raw_prlimit64(unsigned int resource,
+                         const struct rlimit64 *replacement,
+                         struct rlimit64 *observed)
+{
+#ifdef __NR_prlimit64
+    long result = raw_syscall4(__NR_prlimit64, 0, (long) resource,
+                               (long) (uintptr_t) replacement,
+                               (long) (uintptr_t) observed);
+    if (result < 0 && result >= -4095) {
+        errno = (int) -result;
+        return -1;
+    }
+    if (result != 0) {
+        errno = EIO;
+        return -1;
+    }
+    return 0;
+#else
+    (void) resource;
+    (void) replacement;
+    (void) observed;
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+
 static int preserved(const struct esquema_config *cfg, int fd)
 {
     if (!cfg) return 0;
@@ -151,4 +225,29 @@ int es_close_inherited_fds(const struct esquema_config *cfg)
     if (close_with_ranges(cfg) == 0) return 0;
     if (close_from_proc(cfg) == 0) return 0;
     return close_by_limit(cfg);
+}
+
+int es_apply_nofile_limit(const struct esquema_config *cfg)
+{
+    if (!cfg || !cfg->has_open_files_max) return 0;
+    if (cfg->open_files_max < ESQUEMA_OPEN_FILES_MIN ||
+        cfg->open_files_max > ESQUEMA_OPEN_FILES_MAX) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    struct rlimit64 desired = {
+        .rlim_cur = (rlim64_t) cfg->open_files_max,
+        .rlim_max = (rlim64_t) cfg->open_files_max,
+    };
+    struct rlimit64 observed = { 0, 0 };
+    if (raw_prlimit64(RLIMIT_NOFILE, &desired, NULL) < 0 ||
+        raw_prlimit64(RLIMIT_NOFILE, NULL, &observed) < 0)
+        return -1;
+    if (observed.rlim_cur != desired.rlim_cur ||
+        observed.rlim_max != desired.rlim_max) {
+        errno = EIO;
+        return -1;
+    }
+    return 0;
 }

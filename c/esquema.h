@@ -145,10 +145,10 @@ void esquema_config_set_rootfs_ro(esquema_config *cfg, int read_only);
 
 /* Fortress mode makes requested security controls fail closed. It requires
  * all namespaces, a non-legacy versioned seccomp policy, PID-1 supervision,
- * capability dropping, Landlock, and at least one cgroup limit. Requested
- * limits must be installed and read back. Legacy mode remains the default for
- * API compatibility and treats unavailable cgroup delegation or Landlock as
- * best-effort. */
+ * capability dropping, Landlock, at least one cgroup limit, and a configured
+ * open-files limit. Requested limits must be installed and read back. Legacy
+ * mode remains the default for API compatibility and treats unavailable
+ * cgroup delegation or Landlock as best-effort. */
 void esquema_config_set_strict(esquema_config *cfg, int enable);
 
 /* Enable the Landlock "no new filesystem access outside the post-pivot root"
@@ -161,13 +161,30 @@ void esquema_config_set_landlock(esquema_config *cfg, int enable);
 int esquema_config_set_supervisor(esquema_config *cfg, int enable,
                                   unsigned int timeout_ms);
 
-/* Resource limits (cgroup v2, best-effort under rootless delegation).
- * A value <= 0 leaves the corresponding limit unset. */
+/* Resource limits.
+ *
+ * memory/pids/cpu are cgroup-v2 controls (best-effort under rootless
+ * delegation unless strict mode is selected).  A value <= 0 leaves the
+ * corresponding cgroup limit unset.
+ *
+ * open_files_max is a per-process RLIMIT_NOFILE value.  The setter accepts
+ * only the bounded v1 range below.  Before payload exec Esquema sets both the
+ * soft and hard limits to this value and reads them back.  Strict mode
+ * requires the setter to have succeeded.  Preserved descriptors must be
+ * numerically below the configured limit.  Strict seccomp permits resource
+ * limit queries but kills subsequent mutations.  Omitting this setter in
+ * legacy mode preserves the pre-v1 behavior (no Esquema-managed
+ * RLIMIT_NOFILE). */
+#define ESQUEMA_OPEN_FILES_MIN 16U
+#define ESQUEMA_OPEN_FILES_MAX 1048576U
+
 void esquema_config_set_memory_max(esquema_config *cfg, long bytes);
 void esquema_config_set_pids_max(esquema_config *cfg, long count);
 void esquema_config_set_cpu_max(esquema_config *cfg, long quota_us,
                                 long period_us);
 int  esquema_config_set_cgroup_name(esquema_config *cfg, const char *name);
+int  esquema_config_set_open_files_max(esquema_config *cfg,
+                                       uint32_t open_files_max);
 
 /* ---- lifecycle ------------------------------------------------------- */
 
