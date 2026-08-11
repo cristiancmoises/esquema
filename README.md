@@ -8,6 +8,15 @@ and without YAML — just declarative Scheme.
 Containers are **first-class Scheme objects**. Isolation is **explicit,
 fine-grained and secure by default**.
 
+## License
+
+Esquema first-party source is available under either
+`AGPL-3.0-or-later` or a separate signed commercial agreement. The commercial
+notice does not itself grant proprietary-use rights and does not relicense GNU
+Guix, Guile, Linux, libseccomp, libc, or other dependencies. See
+[`LICENSING.md`](LICENSING.md), [`LICENSING.pt-BR.md`](LICENSING.pt-BR.md),
+`NOTICE`, and `LICENSE-COMMERCIAL`.
+
 ---
 
 ## Security model

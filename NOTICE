@@ -1,0 +1,21 @@
+Esquema licensing notice
+========================
+
+Copyright in first-party source remains with its respective copyright
+holders, as identified by repository history and file notices.
+
+Unless a file states different terms, Esquema first-party source in this
+repository is available under either:
+
+  AGPL-3.0-or-later OR LicenseRef-Esquema-Commercial
+
+The complete public AGPL text is in LICENSE and LICENSE-AGPL-3.0.
+LICENSE-COMMERCIAL is an inquiry and scope notice, not a commercial license
+grant. Without a separately executed commercial agreement, recipients may use
+the identified source under the AGPL option.
+
+Dependencies, system libraries, example payloads, generated output, and
+separately noticed files retain their own licenses. Neither option changes the
+license of GNU Guix, Guile, Linux, libseccomp, libc, or other third-party code.
+
+Commercial licensing contact: sac@securityops.co

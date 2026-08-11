@@ -1,0 +1,22 @@
+ESQUEMA COMMERCIAL LICENSING NOTICE
+
+Esquema first-party source is available under either the GNU Affero General
+Public License, version 3 or any later version, or a separate written
+commercial agreement executed by the applicable copyright holder and the
+licensee.
+
+THIS FILE IS NOT A COMMERCIAL LICENSE GRANT. It supplies no permission beyond
+the public AGPL option. Rights under a commercial option exist only when both
+parties execute an agreement covering the exact Esquema version and intended
+use. No warranty, support, patent, indemnification, trademark, pricing,
+redistribution, or proprietary-use term is implied by this notice.
+
+The commercial option applies only to rights owned or controlled by its
+licensor. It does not relicense Guile, GNU Guix, Linux, libseccomp, libc,
+compiler/runtime components, example payload binaries, or any other dependency
+or separately noticed work.
+
+Commercial licensing inquiries: sac@securityops.co
+
+Include the intended use, distribution model, and exact version or commit. Do
+not include secrets, credentials, customer data, or private keys.
