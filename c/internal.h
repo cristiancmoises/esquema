@@ -108,6 +108,11 @@ int es_write_id_maps(pid_t pid, unsigned int uid, unsigned int gid);
  * fresh /proc and a minimal /dev, apply binds. Async-signal-safe. */
 int es_setup_mounts(const struct esquema_config *cfg, int rootfs_fd);
 
+/* Recursively seal PATH read-only with mount_setattr(AT_RECURSIVE).  When
+ * ALLOW_LEGACY is zero, any absence or failure of that operation is fatal;
+ * when nonzero, old-kernel compatibility may use a non-recursive remount. */
+int es_mount_seal_read_only(const char *path, int allow_legacy);
+
 /* Child side: bring the loopback interface up (best-effort). */
 int es_setup_loopback(void);
 

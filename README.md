@@ -53,6 +53,11 @@ async-signal-safe C between `fork` and `execve`:
    detached mounts are made read-only before fd-to-fd `move_mount` attachment.
    Strict mode fails closed when this fd-based mount API is unavailable;
    compatibility mode retains a validated pathname fallback for older kernels.
+   A strict read-only root also requires a successful recursive
+   `mount_setattr(AT_RECURSIVE)` operation and readback. It never treats the
+   legacy single-mount remount as equivalent, because that fallback can leave
+   nested mounts writable. Compatibility mode may use that documented,
+   weaker fallback when the recursive API is unavailable.
 10. **PID-1 supervision** — Fortress uses a minimal supervisor which forwards
     lifecycle signals to the payload process group, adopts and reaps orphaned
     descendants, and escalates from `TERM` to `KILL` after a bounded timeout.

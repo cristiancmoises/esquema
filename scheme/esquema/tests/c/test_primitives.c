@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -20,9 +21,14 @@
 #include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <sys/ioctl.h>
+#include <sys/mount.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/statfs.h>
+#include <sys/statvfs.h>
 #include <linux/capability.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
 
 #include "internal.h"
 
@@ -303,6 +309,157 @@ static int make_file(const char *path)
     return rc;
 }
 
+/* Exercise recursive read-only sealing in a private user+mount namespace.
+ * The nested tmpfs is a distinct mount, so a legacy remount of only the outer
+ * tmpfs cannot make this test pass. */
+static char ro_tree[PATH_MAX];
+static char ro_nested[PATH_MAX];
+static uid_t test_host_uid;
+static gid_t test_host_gid;
+
+static int setup_ro_mount_tree(void)
+{
+    if (unshare(CLONE_NEWUSER | CLONE_NEWNS) < 0) return -1;
+    if (es_write_id_maps(0, (unsigned int) test_host_uid,
+                        (unsigned int) test_host_gid) < 0)
+        return -1;
+    if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) < 0) return -1;
+    if (mount("tmpfs", ro_tree, "tmpfs", MS_NOSUID | MS_NODEV,
+              "mode=0700,size=1m") < 0)
+        return -1;
+    if (mkdir(ro_nested, 0700) < 0) return -1;
+    if (mount("tmpfs", ro_nested, "tmpfs", MS_NOSUID | MS_NODEV,
+              "mode=0700,size=1m") < 0)
+        return -1;
+    return 0;
+}
+
+/* Returns 1 for a successful write, 0 for a read-only rejection, and -1 for
+ * an unexpected failure. */
+static int probe_write(const char *path)
+{
+    errno = 0;
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0) return errno == EROFS ? 0 : -1;
+    int ok = write(fd, "x", 1) == 1;
+    int e = errno;
+    close(fd);
+    errno = e;
+    return ok ? 1 : -1;
+}
+
+static int ro_path(char *out, size_t out_len, const char *dir,
+                   const char *name)
+{
+    int n = snprintf(out, out_len, "%s/%s", dir, name);
+    if (n < 0 || n >= (int) out_len) { errno = ENAMETOOLONG; return -1; }
+    return 0;
+}
+
+/* Exit 75 means this host cannot create the isolated mount fixture. Exit 76
+ * means the fixture worked but recursive mount_setattr is unavailable. */
+static void child_recursive_ro_seal(void)
+{
+    if (setup_ro_mount_tree() < 0) _exit(75);
+    char outer_file[PATH_MAX], nested_file[PATH_MAX];
+    if (ro_path(outer_file, sizeof outer_file, ro_tree, "write-probe") < 0 ||
+        ro_path(nested_file, sizeof nested_file, ro_nested, "write-probe") < 0)
+        _exit(80);
+
+    errno = 0;
+    if (es_mount_seal_read_only(ro_tree, 0) < 0) {
+        if (errno == ENOSYS || errno == EINVAL || errno == EOPNOTSUPP ||
+            errno == EPERM)
+            _exit(76);
+        _exit(81);
+    }
+
+    struct statfs outer, nested;
+    if (statfs(ro_tree, &outer) < 0 || statfs(ro_nested, &nested) < 0)
+        _exit(82);
+    if (!(outer.f_flags & ST_RDONLY) || !(nested.f_flags & ST_RDONLY))
+        _exit(83);
+    if (probe_write(outer_file) != 0 || probe_write(nested_file) != 0)
+        _exit(84);
+    _exit(0);
+}
+
+/* Force precisely the old-kernel condition without depending on the running
+ * kernel: mount_setattr returns ENOSYS, while all other syscalls remain
+ * available to the fixture. */
+static int force_mount_setattr_enosys(void)
+{
+#ifdef __NR_mount_setattr
+    struct sock_filter filter[] = {
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
+                 (unsigned int) offsetof(struct seccomp_data, nr)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mount_setattr, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K,
+                 SECCOMP_RET_ERRNO | (ENOSYS & SECCOMP_RET_DATA)),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+    };
+    struct sock_fprog program = {
+        .len = (unsigned short) (sizeof filter / sizeof filter[0]),
+        .filter = filter,
+    };
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0) return -1;
+    if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program) < 0) return -1;
+#endif
+    return 0;
+}
+
+static void child_strict_ro_no_fallback(void)
+{
+    if (setup_ro_mount_tree() < 0) _exit(75);
+    if (force_mount_setattr_enosys() < 0) _exit(76);
+
+    char outer_strict[PATH_MAX], nested_strict[PATH_MAX];
+    char outer_compat[PATH_MAX], nested_compat[PATH_MAX];
+    if (ro_path(outer_strict, sizeof outer_strict, ro_tree,
+                "strict-probe") < 0 ||
+        ro_path(nested_strict, sizeof nested_strict, ro_nested,
+                "strict-probe") < 0 ||
+        ro_path(outer_compat, sizeof outer_compat, ro_tree,
+                "compat-probe") < 0 ||
+        ro_path(nested_compat, sizeof nested_compat, ro_nested,
+                "compat-probe") < 0)
+        _exit(80);
+
+    errno = 0;
+    if (es_mount_seal_read_only(ro_tree, 0) != -1 || errno != ENOSYS)
+        _exit(81);
+    /* Strict failure must not quietly have applied the weaker operation. */
+    if (probe_write(outer_strict) != 1 || probe_write(nested_strict) != 1)
+        _exit(82);
+
+    if (es_mount_seal_read_only(ro_tree, 1) < 0) _exit(83);
+    struct statfs outer, nested;
+    if (statfs(ro_tree, &outer) < 0 || statfs(ro_nested, &nested) < 0)
+        _exit(84);
+    /* This deliberately demonstrates why the compatibility fallback cannot
+     * satisfy Fortress: only the outer mount is read-only. */
+    if (!(outer.f_flags & ST_RDONLY) || (nested.f_flags & ST_RDONLY))
+        _exit(85);
+    if (probe_write(outer_compat) != 0 || probe_write(nested_compat) != 1)
+        _exit(86);
+    _exit(0);
+}
+
+static int run_ro_mount_test(void (*child)(void))
+{
+    char base[] = "/tmp/esq-recursive-ro-XXXXXX";
+    if (!mkdtemp(base)) return -1;
+    if (strlen(base) >= sizeof ro_tree ||
+        snprintf(ro_nested, sizeof ro_nested, "%s/nested", base) >=
+            (int) sizeof ro_nested) {
+        rmdir(base); errno = ENAMETOOLONG; return -1;
+    }
+    strcpy(ro_tree, base);
+    int st = run_child(child);
+    rmdir(base);
+    return st;
+}
+
 static int test_landlock_scope(void)
 {
     char base[] = "/tmp/esq-landlock-XXXXXX";
@@ -362,6 +519,8 @@ static int test_strict_cgroup_failure(int *clean_teardown)
 
 int main(void)
 {
+    test_host_uid = getuid();
+    test_host_gid = getgid();
     printf("Esquema C primitive tests (version %s)\n", esquema_version());
 
     /* ---- version / init ---- */
@@ -451,6 +610,32 @@ int main(void)
         } else {
             printf("BLOCKED landlock: kernel reports ABI %d (%s)\n",
                    abi, abi < 0 ? strerror(errno) : "unsupported");
+        }
+    }
+
+    /* ---- recursive read-only mount sealing ---- */
+    {
+        int st = run_ro_mount_test(child_recursive_ro_seal);
+        if (WIFEXITED(st) &&
+            (WEXITSTATUS(st) == 75 || WEXITSTATUS(st) == 76)) {
+            printf("BLOCKED recursive read-only sealing: isolated mount or "
+                   "mount_setattr capability unavailable (exit %d)\n",
+                   WEXITSTATUS(st));
+        } else {
+            check("mount_setattr: outer and nested mounts read-only by readback",
+                  WIFEXITED(st) && WEXITSTATUS(st) == 0);
+        }
+    }
+    {
+        int st = run_ro_mount_test(child_strict_ro_no_fallback);
+        if (WIFEXITED(st) &&
+            (WEXITSTATUS(st) == 75 || WEXITSTATUS(st) == 76)) {
+            printf("BLOCKED strict read-only fallback test: isolated mount or "
+                   "seccomp fixture unavailable (exit %d)\n",
+                   WEXITSTATUS(st));
+        } else {
+            check("strict read-only: ENOSYS fails closed; compatibility remains weaker",
+                  WIFEXITED(st) && WEXITSTATUS(st) == 0);
         }
     }
 

@@ -89,9 +89,16 @@ static int remount_ro_legacy(const char *dst)
  * nested submounts of a MS_REC bind (or of the rootfs) writable/executable —
  * the classic recursive-bind RO bypass. mount_setattr(AT_RECURSIVE) applies
  * read-only to the mount and every submount atomically, preserving locked
- * flags; fall back to the legacy per-mount remount only if unavailable. */
-static int remount_ro(const char *dst)
+ * flags.
+ *
+ * Strict/Fortress callers pass allow_legacy == 0.  For them, any
+ * mount_setattr failure is returned unchanged: a successful single-mount
+ * remount is not evidence that the subtree is sealed.  Compatibility callers
+ * may explicitly retain the old single-mount fallback on kernels that cannot
+ * perform the recursive operation. */
+int es_mount_seal_read_only(const char *dst, int allow_legacy)
 {
+    if (!dst || dst[0] == '\0') { errno = EINVAL; return -1; }
 #ifdef __NR_mount_setattr
 #ifndef MOUNT_ATTR_RDONLY
 #define MOUNT_ATTR_RDONLY 0x00000001
@@ -103,11 +110,19 @@ static int remount_ro(const char *dst)
         unsigned long long attr_set, attr_clr, propagation, userns_fd;
     } attr = { MOUNT_ATTR_RDONLY, 0, 0, 0 };
     if (syscall(__NR_mount_setattr, AT_FDCWD, dst, AT_RECURSIVE,
-                &attr, sizeof attr) == 0)
+                &attr, sizeof attr) == 0) {
+        struct statfs sfs;
+        if (statfs(dst, &sfs) < 0) return -1;
+        if (!(sfs.f_flags & ST_RDONLY)) { errno = EIO; return -1; }
         return 0;
-    if (errno != ENOSYS && errno != EINVAL && errno != EPERM)
+    }
+    if (!allow_legacy)
         return -1;
-    /* else fall through to the legacy path */
+    if (errno != ENOSYS && errno != EINVAL && errno != EOPNOTSUPP &&
+        errno != EPERM)
+        return -1;
+#else
+    if (!allow_legacy) { errno = ENOSYS; return -1; }
 #endif
     return remount_ro_legacy(dst);
 }
@@ -234,7 +249,9 @@ static int attach_bind_legacy(const struct esquema_config *cfg, size_t index,
     }
     if (mount(cfg->binds[index].src, dst, NULL, MS_BIND | MS_REC, NULL) < 0)
         return -1;
-    if (cfg->binds[index].read_only && remount_ro(dst) < 0) return -1;
+    if (cfg->binds[index].read_only &&
+        es_mount_seal_read_only(dst, 1) < 0)
+        return -1;
     return 0;
 }
 
@@ -327,7 +344,8 @@ int es_setup_mounts(const struct esquema_config *cfg, int rootfs_fd)
     if (chdir("/") < 0) return -1;
 
     /* 6. Optionally seal the root read-only (preserving locked flags). */
-    if (cfg->rootfs_ro && remount_ro("/") < 0)
+    if (cfg->rootfs_ro &&
+        es_mount_seal_read_only("/", cfg->strict ? 0 : 1) < 0)
         return -1;
     return 0;
 }
