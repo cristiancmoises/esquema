@@ -5,6 +5,7 @@
 ;;; relevant protection must reproduce the leak) so a sandbox that silently
 ;;; protects nothing is caught.
 (use-modules (srfi srfi-64)
+             (srfi srfi-1)
              (srfi srfi-13)
              (ice-9 format)
              (esquema ffi)
@@ -17,6 +18,12 @@
   (let loop ((i 0) (n 0))
     (let ((j (string-contains out sub i)))
       (if j (loop (+ j 1) (+ n 1)) n))))
+
+(define (wait-for-path path attempts)
+  (let loop ((remaining attempts))
+    (cond ((file-exists? path) #t)
+          ((zero? remaining) #f)
+          (else (usleep 10000) (loop (- remaining 1))))))
 
 (test-begin "esquema-security")
 (define runner (test-runner-current))
@@ -213,6 +220,182 @@
   (test-assert "S10b setup/reaper process is gone after wait"
                (not (file-exists?
                      (string-append "/proc/" (number->string pid))))))
+
+;; ---- S11: bind destinations are lexical and fd-resolved ---------------
+(test-assert "S11a Scheme path rejects an absolute bind destination"
+  (catch #t
+    (lambda ()
+      (let ((cfg (container->config
+                  (make-container "bad-bind" rootfs '("/bin/sh")
+                                  #:mounts (list (list "/tmp" "/escape" #t))))))
+        (esquema-config-free cfg)
+        #f))
+    (lambda _ #t)))
+(test-assert "S11b Scheme path rejects bind traversal"
+  (catch #t
+    (lambda ()
+      (let ((cfg (container->config
+                  (make-container "bad-bind" rootfs '("/bin/sh")
+                                  #:mounts
+                                  (list (list "/tmp" "tmp/../escape" #t))))))
+        (esquema-config-free cfg)
+        #f))
+    (lambda _ #t)))
+
+(let* ((outside (string-append rootfs "-outside"))
+       (source (string-append rootfs "-bind-source"))
+       (link (string-append rootfs "/escape-link"))
+       (canary (string-append outside "/canary")))
+  (mkdir outside #o700)
+  (mkdir source #o700)
+  (call-with-output-file canary (lambda (p) (display "UNCHANGED" p)))
+  (symlink outside link)
+  (let ((rc (run-status rootfs "exit 0"
+                        #:mounts (list (list source "escape-link" #t)))))
+    (test-eqv "S11c symlink destination fails before payload exec" 94 rc)
+    (test-equal "S11d rejected bind did not alter outside target"
+                "UNCHANGED" (file-content canary)))
+  (delete-file link)
+  (delete-file canary)
+  (rmdir outside)
+  (rmdir source))
+
+;; A procfs fd entry is a magiclink.  It must not be accepted merely because
+;; it lexically sits below the configured root.
+(test-eqv "S11e procfs magiclink bind destination is rejected"
+          94
+          (run-status rootfs "exit 0"
+                      #:mounts (list (list "/tmp" "proc/self/fd/0" #t))))
+
+;; ---- S12: typed seccomp is usable from declarative Scheme -------------
+(test-eqv "S12 Fortress seccomp policy executes an ordinary payload"
+          0
+          (run-status rootfs "exit 0"
+                      #:seccomp-policy (fortress-seccomp-policy)))
+
+;; ---- S13: PID-1 supervision and bounded teardown ----------------------
+(let* ((ready (string-append rootfs "/signal-ready"))
+       (seen (string-append rootfs "/signal-seen"))
+       (c (make-container
+           "signal-forward" rootfs
+           (list "/bin/sh" "-c"
+                 "trap 'echo FORWARDED > /signal-seen; exit 23' TERM; echo READY > /signal-ready; while :; do read -t 1 _ || :; done")
+           #:env '(("PATH" . "/bin"))
+           #:seccomp-policy (fortress-seccomp-policy)
+           #:supervise? #t
+           #:teardown-timeout-ms 250))
+       (pid (spawn-container c)))
+  (test-assert "S13a supervised payload reaches ready state"
+               (wait-for-path ready 300))
+  (kill pid SIGTERM)
+  (let ((rc (esquema-wait pid)))
+    (test-eqv "S13b TERM is forwarded to the payload" 23 rc)
+    (test-assert "S13c payload observed the forwarded signal"
+                 (and (file-exists? seen)
+                      (has? (file-content seen) "FORWARDED")))
+    (test-assert "S13d supervisor/setup process is gone"
+                 (not (file-exists?
+                       (string-append "/proc/" (number->string pid))))))
+  (when (file-exists? ready) (delete-file ready))
+  (when (file-exists? seen) (delete-file seen)))
+
+(let* ((ready (string-append rootfs "/teardown-ready"))
+       (c (make-container
+           "bounded-teardown" rootfs
+           (list "/bin/sh" "-c"
+                 "trap '' TERM; echo READY > /teardown-ready; while :; do read -t 1 _ || :; done")
+           #:env '(("PATH" . "/bin"))
+           #:seccomp-policy (fortress-seccomp-policy)
+           #:supervise? #t
+           #:teardown-timeout-ms 100))
+       (pid (spawn-container c)))
+  (test-assert "S13e TERM-ignoring payload reaches ready state"
+               (wait-for-path ready 300))
+  (let ((start (get-internal-real-time)))
+    (kill pid SIGTERM)
+    (let* ((rc (esquema-wait pid))
+           (elapsed (/ (- (get-internal-real-time) start)
+                       internal-time-units-per-second)))
+      (test-eqv "S13f TERM-ignoring payload is force-killed" 137 rc)
+      (test-assert "S13g forced teardown remains bounded"
+                   (< elapsed 3))))
+  (when (file-exists? ready) (delete-file ready)))
+
+;; The primary payload exits while an ignored-TERM descendant remains. As PID
+;; 1, the supervisor adopts it, escalates after the bound, reaps it, and only
+;; then returns the primary status.
+(let* ((ready (string-append rootfs "/orphan-ready"))
+       (c (make-container
+           "orphan-reap" rootfs
+           (list "/bin/sh" "-c"
+                 "(trap '' TERM; while :; do read -t 1 _ || :; done) & echo READY > /orphan-ready; exit 7")
+           #:env '(("PATH" . "/bin"))
+           #:seccomp-policy (fortress-seccomp-policy)
+           #:supervise? #t
+           #:teardown-timeout-ms 100))
+       (pid (spawn-container c))
+       (rc (esquema-wait pid)))
+  (test-eqv "S13h supervisor preserves primary status after orphan reap" 7 rc)
+  (test-assert "S13i adopted descendant and namespace are fully reaped"
+               (and (file-exists? ready)
+                    (not (file-exists?
+                          (string-append "/proc/" (number->string pid))))))
+  (when (file-exists? ready) (delete-file ready)))
+
+;; The launcher does not return the setup pid until its signal relay is live.
+;; Therefore even a stop issued immediately after spawn must reach the future
+;; PID-1 supervisor instead of killing A and leaving an untracked cell behind.
+(let* ((c (make-container
+           "immediate-stop" rootfs
+           (list "/bin/sh" "-c"
+                 "while :; do read -t 1 _ || :; done")
+           #:env '(("PATH" . "/bin"))
+           #:seccomp-policy (fortress-seccomp-policy)
+           #:supervise? #t
+           #:teardown-timeout-ms 100))
+       (pid (spawn-container c)))
+  (kill pid SIGTERM)
+  (let ((rc (esquema-wait pid)))
+    (test-assert "S13j immediate TERM is relayed or bounded-killed"
+                 (or (= rc 143) (= rc 137)))
+    (test-assert "S13k immediate stop leaves no setup process"
+                 (not (file-exists?
+                       (string-append "/proc/" (number->string pid)))))))
+
+;; ---- S14: more than the historical 64 concurrent launches ------------
+(let* ((count 72)
+       (indexes (iota count))
+       (ready-path
+        (lambda (i) (string-append rootfs "/concurrent-" (number->string i))))
+       (pids
+        (map (lambda (i)
+               (spawn-container
+                (make-container
+                 (string-append "concurrent-" (number->string i)) rootfs
+                 (list "/bin/sh" "-c"
+                       (string-append "echo READY > /concurrent-"
+                                      (number->string i)
+                                      "; kill -STOP $$; exit 0"))
+                 #:env '(("PATH" . "/bin")))))
+             indexes)))
+  (test-assert "S14a 72 containers run concurrently"
+    (let loop ((remaining 500))
+      (cond ((every (lambda (i) (file-exists? (ready-path i))) indexes) #t)
+            ((zero? remaining) #f)
+            (else (usleep 10000) (loop (- remaining 1))))))
+  (for-each (lambda (pid) (kill pid SIGCONT)) pids)
+  (let ((statuses (map esquema-wait pids)))
+    (test-assert "S14b all 72 concurrent payloads exit cleanly"
+                 (every zero? statuses))
+    (test-assert "S14c all 72 setup processes are cleaned up"
+      (every (lambda (pid)
+               (not (file-exists?
+                     (string-append "/proc/" (number->string pid)))))
+             pids)))
+  (for-each (lambda (i)
+              (let ((path (ready-path i)))
+                (when (file-exists? path) (delete-file path))))
+            indexes))
 
 (remove-rootfs rootfs)
 (test-end "esquema-security")

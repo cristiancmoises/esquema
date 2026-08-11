@@ -6,6 +6,7 @@
 ;;; untrusted payload from a multi-threaded interpreter safe.
 (define-module (esquema sandbox)
   #:use-module (system foreign)
+  #:use-module (srfi srfi-1)
   #:use-module (esquema ffi)
   #:use-module (esquema container)
   #:use-module (esquema constants)
@@ -61,10 +62,52 @@
     (let ((idm (container-id-map c)))
       (when idm (esquema-config-set-id-map cfg (car idm) (cdr idm))))
     (esquema-config-set-seccomp cfg (container-seccomp? c))
+    (let ((policy (container-seccomp-policy c)))
+      (when policy
+        (define (arch-value arch)
+          (case arch
+            ((native) 0)
+            ((x86-64) 1)
+            ((aarch64) 2)
+            (else (error "esquema: unknown seccomp architecture" arch))))
+        (define (socket-bit family)
+          (case family
+            ((unix) 1)
+            ((inet) 2)
+            ((inet6) 4)
+            ((netlink) 8)
+            ((vsock) 16)
+            (else (error "esquema: unknown socket family" family))))
+        (define (io-uring-value value)
+          (case value
+            ((deny) 0)
+            ((allow) 1)
+            (else (error "esquema: unknown io_uring policy" value))))
+        (define (ioctl-value value)
+          (case value
+            ((none) 0)
+            ((restricted) 1)
+            ((legacy) 2)
+            (else (error "esquema: unknown ioctl policy" value))))
+        (let ((sockets (fold (lambda (family mask)
+                               (logior mask (socket-bit family)))
+                             0
+                             (seccomp-policy-socket-families policy))))
+          (checked "seccomp policy"
+                   (esquema-config-set-seccomp-policy-v1
+                    cfg
+                    (arch-value (seccomp-policy-expected-arch policy))
+                    sockets
+                    (io-uring-value (seccomp-policy-io-uring policy))
+                    (ioctl-value (seccomp-policy-ioctl policy)))))))
     (esquema-config-set-drop-caps cfg (container-drop-caps? c))
     (esquema-config-set-rootfs-ro cfg (container-rootfs-ro? c))
     (esquema-config-set-strict cfg (container-strict? c))
     (esquema-config-set-landlock cfg (container-landlock? c))
+    (checked "supervisor"
+             (esquema-config-set-supervisor
+              cfg (container-supervise? c)
+              (container-teardown-timeout-ms c)))
     (let ((lim (container-limits c))
           (cg  (container-cgroup-name c)))
       (when (or lim cg)

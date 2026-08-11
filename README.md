@@ -25,9 +25,13 @@ async-signal-safe C between `fork` and `execve`:
 4. **All capabilities dropped** — bounding set emptied, ambient cleared,
    `capset` zeroed, `securebits` locked (`SECBIT_NOROOT`, so uid-0-in-ns confers
    nothing), and `PR_SET_NO_NEW_PRIVS` set so setuid binaries cannot escalate.
-5. **seccomp-BPF allowlist** — default `ENOSYS`, with a `KILL_PROCESS` deny-set
-   for `ptrace`, `mount`, `unshare`, `setns`, `bpf`, `keyctl`, module and kexec
-   syscalls, etc. Non-native (incl. x32) ABIs are killed.
+5. **Versioned seccomp-BPF policy** — default `ENOSYS`, with a mandatory
+   `KILL_PROCESS` deny-set for `ptrace`, `mount`, `unshare`, `setns`, `bpf`,
+   `keyctl`, module and kexec syscalls, etc. Version 1 validates the runtime
+   architecture, selects allowed socket families, makes `io_uring` an explicit
+   allow-or-kill decision, and offers `none`, `restricted`, or legacy ioctl
+   handling. `TIOCSTI` and `TIOCLINUX` remain fatal invariants. Non-native
+   (including x32) ABIs are killed.
 6. **Landlock filesystem scope** — when the running kernel supports Landlock,
    future path opens covered by the build-time Landlock headers are confined
    beneath the post-`pivot_root` filesystem.
@@ -42,10 +46,26 @@ async-signal-safe C between `fork` and `execve`:
    delegation. Opt-in `#:strict? #t` mode installs and reads back every
    requested `memory.max`, `pids.max`, and `cpu.max` value before releasing the
    payload, and aborts cleanly if delegation or verification fails.
+9. **Race-resistant bind attachment** — destinations must be relative and may
+   not contain empty, `.` or `..` components. They are resolved beneath a
+   pinned root with `openat2` (`RESOLVE_BENEATH`, `NO_SYMLINKS`,
+   `NO_MAGICLINKS`) or a component-by-component fd walk. On modern kernels,
+   detached mounts are made read-only before fd-to-fd `move_mount` attachment.
+   Strict mode fails closed when this fd-based mount API is unavailable;
+   compatibility mode retains a validated pathname fallback for older kernels.
+10. **PID-1 supervision** — Fortress uses a minimal supervisor which forwards
+    lifecycle signals to the payload process group, adopts and reaps orphaned
+    descendants, and escalates from `TERM` to `KILL` after a bounded timeout.
+    The launcher does not return a cell pid until its host-side signal relay is
+    installed, so an immediate stop request is not lost during setup.
+    Process-wide cleanup records are dynamically allocated, cross-thread safe,
+    and capped at 4096 live cgroup-backed launches instead of a fixed 64-slot
+    thread-local table.
 
 This is verified by the test-suite (see *Testing*): the payload cannot see host
 PIDs, cannot reach the host filesystem, has an empty capability set, is killed
-on a denied syscall, and sees only loopback networking.
+on a denied syscall, and sees only loopback networking. Esquema cells still
+share the host Linux kernel; these controls are not a hypervisor or VM boundary.
 
 ### How this compares
 
@@ -103,6 +123,21 @@ Define and run a container from Scheme:
 capability dropped unless you opt out (`#:seccomp? #f`, `#:drop-caps? #f`,
 `#:namespaces '(user mount pid ...)`).
 
+Select the typed version-1 policy explicitly for a non-Fortress cell when its
+socket, `io_uring`, and ioctl requirements are known:
+
+```scheme
+(make-container "parser" "/path/to/rootfs" '("/bin/parser")
+                #:seccomp-policy
+                (make-seccomp-policy 'native '(unix) 'deny 'restricted)
+                #:supervise? #t
+                #:teardown-timeout-ms 1000)
+```
+
+The positional `(container name rootfs command)` constructor and configurations
+without `#:seccomp-policy` retain the legacy seccomp behavior for API
+compatibility. That compatibility policy is not accepted as a Fortress policy.
+
 Landlock is defence in depth, not a complete filesystem monitor. It does not
 mediate reads and writes on files opened before restriction, and Linux does
 not currently mediate every metadata operation (for example all `chmod`,
@@ -112,8 +147,11 @@ not justify claiming coverage for rights unknown to those headers.
 
 Fortress callers must additionally select `#:strict? #t`, provide at least one
 cgroup limit, and leave all namespaces, seccomp, capability dropping, and
-Landlock enabled. Strict mode deliberately fails when the host has not
-delegated the requested cgroup controllers; it never silently converts a
+Landlock enabled. The Scheme constructor automatically supplies the typed
+Fortress seccomp policy and enables PID-1 supervision for strict cells. Direct
+C callers must set both explicitly. Strict mode deliberately fails when the
+host has not delegated the requested cgroup controllers; it never silently
+converts a
 mandatory limit into best-effort operation. The legacy constructor and its
 best-effort cgroup behavior remain available for compatibility, but are not a
 Fortress boundary.
@@ -217,7 +255,10 @@ isolation and escape attempts with positive+negative controls
 (`security.scm`), C-level enforcement including the seccomp `SIGSYS` kill
 (`tests/c/test_primitives.c`), Landlock ABI/path enforcement, inherited-secret
 descriptor closure plus explicit descriptor delegation, strict cgroup abort
-and child reaping, and performance/leak guards (`performance.scm`).
+and child reaping, typed seccomp architecture/socket/`io_uring`/ioctl policy,
+symlink and magiclink bind attacks, supervisor signal/timeout behavior, orphan
+reaping, 72 concurrent launches, and performance/leak guards
+(`performance.scm`).
 The C library builds warning-clean under `-Wall -Wextra -Werror` with FORTIFY,
 stack-protector/clash protection, full RELRO, a non-executable stack and
 CF-protection.

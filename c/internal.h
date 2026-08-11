@@ -65,6 +65,11 @@ struct esquema_config {
     int rootfs_ro;
     int strict;
     int landlock;
+    int supervise;
+    unsigned int teardown_timeout_ms;
+
+    esquema_seccomp_policy seccomp_policy;
+    int has_seccomp_policy;
 
     int   *preserve_fds;      /* sorted, unique; stdin/out/err are implicit */
     size_t preserve_fds_n;
@@ -81,7 +86,8 @@ struct esquema_config {
 
 /* Build the hardened BPF program into *out (malloc'd filter buffer the
  * caller must free with es_seccomp_free_program). Returns 0 / -1. */
-int  es_seccomp_compile(struct sock_fprog *out);
+int  es_seccomp_compile(const esquema_seccomp_policy *policy,
+                        struct sock_fprog *out);
 /* Build the small stacked TTY-injection (TIOCSTI/TIOCLINUX) kill filter.
  * Apply this BEFORE the main filter in the child. */
 int  es_seccomp_compile_tty(struct sock_fprog *out);
@@ -100,7 +106,7 @@ int es_write_id_maps(pid_t pid, unsigned int uid, unsigned int gid);
 
 /* Child side (post-map): make mounts private, pivot into rootfs, mount a
  * fresh /proc and a minimal /dev, apply binds. Async-signal-safe. */
-int es_setup_mounts(const struct esquema_config *cfg);
+int es_setup_mounts(const struct esquema_config *cfg, int rootfs_fd);
 
 /* Child side: bring the loopback interface up (best-effort). */
 int es_setup_loopback(void);
@@ -115,6 +121,23 @@ int es_landlock_restrict_root(const char *path);
  * on preserved descriptors so an explicitly delegated channel reaches the
  * payload.  Uses close_range with a raw /proc/self/fd fallback. */
 int es_close_inherited_fds(const struct esquema_config *cfg);
+
+/* ---- PID-1 supervision / lifecycle bookkeeping ---------------------- */
+
+/* Fork+exec the configured payload under a PID-1 reaper. Returns the
+ * payload's shell-style status after all descendants are gone. */
+int es_supervise_exec(char *const argv[], char *const envp[],
+                      unsigned int timeout_ms);
+
+/* Wait for PID while forwarding lifecycle signals received by this setup
+ * process. Returns a shell-style status. */
+int es_forwarding_prepare(void);
+int es_wait_forwarding(pid_t pid);
+
+/* Dynamically bounded, cross-thread cgroup cleanup records. */
+int    es_lifecycle_track(pid_t pid, const char *path);
+char  *es_lifecycle_take(pid_t pid);
+size_t es_lifecycle_count(void);
 
 /* ---- cgroup v2 (parent side) ----------------------------------------- */
 

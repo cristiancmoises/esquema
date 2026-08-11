@@ -14,6 +14,8 @@
 #ifndef ESQUEMA_H
 #define ESQUEMA_H
 
+#include <stddef.h>
+#include <stdint.h>
 #include <sys/types.h>
 
 #ifdef __cplusplus
@@ -56,6 +58,61 @@ const char *esquema_strerror(void);
 
 typedef struct esquema_config esquema_config;
 
+/* Versioned, fixed-layout seccomp policy.  Unknown versions, sizes, enum
+ * values, flags, and reserved fields are rejected instead of guessed. */
+#define ESQUEMA_SECCOMP_POLICY_VERSION 1U
+
+enum esquema_seccomp_arch {
+    ESQUEMA_ARCH_NATIVE  = 0,
+    ESQUEMA_ARCH_X86_64  = 1,
+    ESQUEMA_ARCH_AARCH64 = 2
+};
+
+enum esquema_socket_family {
+    ESQUEMA_SOCKET_UNIX    = 1ULL << 0,
+    ESQUEMA_SOCKET_INET    = 1ULL << 1,
+    ESQUEMA_SOCKET_INET6   = 1ULL << 2,
+    ESQUEMA_SOCKET_NETLINK = 1ULL << 3,
+    ESQUEMA_SOCKET_VSOCK   = 1ULL << 4,
+    ESQUEMA_SOCKET_ALL     = (1ULL << 5) - 1
+};
+
+enum esquema_io_uring_policy {
+    ESQUEMA_IO_URING_DENY  = 0,
+    ESQUEMA_IO_URING_ALLOW = 1
+};
+
+enum esquema_ioctl_policy {
+    ESQUEMA_IOCTL_NONE       = 0,
+    ESQUEMA_IOCTL_RESTRICTED = 1,
+    ESQUEMA_IOCTL_LEGACY     = 2
+};
+
+typedef struct esquema_seccomp_policy {
+    uint32_t version;
+    uint32_t size;
+    uint32_t expected_arch;
+    uint32_t io_uring;
+    uint32_t ioctl_policy;
+    uint32_t flags;
+    uint64_t socket_families;
+    uint64_t reserved[2];
+} esquema_seccomp_policy;
+
+/* Initialize POLICY to the Fortress v1 default: native architecture,
+ * AF_UNIX/INET/INET6, io_uring denied, restricted ioctl requests. */
+void esquema_seccomp_policy_init(esquema_seccomp_policy *policy);
+
+/* Copy a validated v1 policy into CFG.  The legacy global allowlist remains
+ * active when no versioned policy has been assigned. */
+int esquema_config_set_seccomp_policy(esquema_config *cfg,
+                                      const esquema_seccomp_policy *policy);
+int esquema_config_set_seccomp_policy_v1(esquema_config *cfg,
+                                         uint32_t expected_arch,
+                                         uint64_t socket_families,
+                                         uint32_t io_uring,
+                                         uint32_t ioctl_policy);
+
 esquema_config *esquema_config_new(void);
 void            esquema_config_free(esquema_config *cfg);
 
@@ -65,7 +122,10 @@ int esquema_config_set_hostname(esquema_config *cfg, const char *name);
 int esquema_config_add_arg(esquema_config *cfg, const char *arg);
 int esquema_config_add_env(esquema_config *cfg, const char *keyval);
 /* Extra bind mount: host <src> -> in-container <dst>, before pivot_root.
- * read_only != 0 remounts the bind read-only. */
+ * DST is a relative path with no empty, ".", or ".." components. Symlinks and
+ * procfs magiclinks in the destination walk are rejected. read_only != 0
+ * makes the detached bind tree read-only before it is attached where the
+ * running kernel supports the fd-based mount API. */
 int esquema_config_add_bind(esquema_config *cfg, const char *src,
                             const char *dst, int read_only);
 
@@ -83,16 +143,23 @@ void esquema_config_set_seccomp(esquema_config *cfg, int enable);
 void esquema_config_set_drop_caps(esquema_config *cfg, int enable);
 void esquema_config_set_rootfs_ro(esquema_config *cfg, int read_only);
 
-/* Fortress mode makes requested security controls fail closed.  In
- * particular, a requested cgroup limit must be installed and read back, and
- * the default Landlock root policy must be enforceable.  Legacy mode remains
- * the default for API compatibility and treats unavailable cgroup delegation
- * or Landlock as best-effort. */
+/* Fortress mode makes requested security controls fail closed. It requires
+ * all namespaces, a non-legacy versioned seccomp policy, PID-1 supervision,
+ * capability dropping, Landlock, and at least one cgroup limit. Requested
+ * limits must be installed and read back. Legacy mode remains the default for
+ * API compatibility and treats unavailable cgroup delegation or Landlock as
+ * best-effort. */
 void esquema_config_set_strict(esquema_config *cfg, int enable);
 
 /* Enable the Landlock "no new filesystem access outside the post-pivot root"
  * layer.  It is enabled by default.  Failure is fatal only in strict mode. */
 void esquema_config_set_landlock(esquema_config *cfg, int enable);
+
+/* Run a minimal PID-1 supervisor rather than execing the payload as PID 1.
+ * It reaps orphaned descendants, forwards host lifecycle signals, and kills
+ * remaining descendants after timeout_ms (1..60000). Strict mode requires it. */
+int esquema_config_set_supervisor(esquema_config *cfg, int enable,
+                                  unsigned int timeout_ms);
 
 /* Resource limits (cgroup v2, best-effort under rootless delegation).
  * A value <= 0 leaves the corresponding limit unset. */
@@ -115,6 +182,10 @@ int   esquema_wait(pid_t pid);
 /* Apply the hardened seccomp allowlist to the *current* thread.
  * Denied syscalls trigger SCMP_ACT_KILL_PROCESS. Sets NO_NEW_PRIVS. */
 int esquema_apply_seccomp(void);
+
+/* Apply a validated versioned policy to the current thread.  The mandatory
+ * invariant deny-set is always present and cannot be removed by the policy. */
+int esquema_apply_seccomp_policy(const esquema_seccomp_policy *policy);
 
 /* Drop every capability (bounding set + ambient set + inheritable/
  * permitted/effective via capset), lock securebits and set NO_NEW_PRIVS. */

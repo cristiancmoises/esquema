@@ -1,12 +1,13 @@
 /* spawn.c — top-level sandbox orchestrator.
  *
- * Sequence (P = host/Guile process, A = setup child, B = payload / PID 1):
+ * Sequence (P = host/Guile process, A = setup child, B = namespace PID 1):
  *   P  compiles the seccomp filter (safe: not post-fork), forks A.
  *   A  is single-threaded (fork copies only the calling thread), which is
  *      what lets it unshare a user namespace at all; it writes its own
  *      uid/gid maps, sets the hostname, then forks B.
- *   B  becomes PID 1 of the new PID namespace, sets up mounts + loopback,
- *      drops all capabilities, applies seccomp and execve()s the payload.
+ *   B  sets up mounts + loopback, drops all capabilities and applies seccomp.
+ *      Fortress B then supervises a payload child; compatibility mode may
+ *      execve() the payload directly.
  *   P  optionally moves A into a cgroup, then returns A's pid; esquema_wait
  *      reaps A (whose status is B's status) and cleans the cgroup up.
  *
@@ -14,6 +15,7 @@
 #include "internal.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <sched.h>
 #include <signal.h>
@@ -21,44 +23,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/prctl.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
-
-/* Per-thread pid -> created-cgroup-path map, so esquema_wait cleans up the
- * cgroup belonging to the pid it actually reaped even when several containers
- * are live on one thread. */
-#define ES_CG_SLOTS 64
-static __thread pid_t  g_cg_pid[ES_CG_SLOTS];
-static __thread char  *g_cg_path[ES_CG_SLOTS];
-
-static int cg_store(pid_t pid, const char *path)
-{
-    if (!path || !path[0]) return 0;
-    for (int i = 0; i < ES_CG_SLOTS; i++) {
-        if (g_cg_pid[i] == 0) {
-            char *p = strdup(path);
-            if (!p) { errno = ENOMEM; return -1; }
-            g_cg_path[i] = p;
-            g_cg_pid[i]  = pid;
-            return 0;
-        }
-    }
-    errno = ENOSPC;
-    return -1;
-}
-
-/* Detach and return the path for `pid` (caller frees), or NULL. */
-static char *cg_take(pid_t pid)
-{
-    for (int i = 0; i < ES_CG_SLOTS; i++) {
-        if (g_cg_pid[i] == pid) {
-            char *p = g_cg_path[i];
-            g_cg_pid[i]  = 0;
-            g_cg_path[i] = NULL;
-            return p;
-        }
-    }
-    return NULL;
-}
 
 static unsigned int ns_to_clone(unsigned int m)
 {
@@ -82,7 +48,10 @@ static char *default_env[] = {
 static int strict_config_ok(const esquema_config *cfg)
 {
     if (!cfg->strict) return 1;
-    if (!cfg->seccomp || !cfg->drop_caps || !cfg->landlock) return 0;
+    if (!cfg->seccomp || !cfg->drop_caps || !cfg->landlock ||
+        !cfg->supervise || !cfg->has_seccomp_policy)
+        return 0;
+    if (cfg->seccomp_policy.ioctl_policy == ESQUEMA_IOCTL_LEGACY) return 0;
     if ((cfg->ns_mask & ESQUEMA_NS_ALL) != ESQUEMA_NS_ALL) return 0;
     if (!cfg->cgroup_name) return 0;
     if (cfg->memory_max <= 0 && cfg->pids_max <= 0 && cfg->cpu_quota_us <= 0)
@@ -123,6 +92,19 @@ pid_t esquema_spawn(esquema_config *cfg)
     free(cfg->rootfs);
     cfg->rootfs = newroot;
 
+    int rootfs_fd = open(cfg->rootfs,
+                         O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (rootfs_fd < 0) return (pid_t) es_fail("spawn: open rootfs");
+    struct stat root_stat;
+    if (fstat(rootfs_fd, &root_stat) < 0) {
+        int e = errno; close(rootfs_fd); errno = e;
+        return (pid_t) es_fail("spawn: rootfs not directory");
+    }
+    if (!S_ISDIR(root_stat.st_mode)) {
+        close(rootfs_fd); errno = ENOTDIR;
+        return (pid_t) es_fail("spawn: rootfs not directory");
+    }
+
     char **envp = (cfg->envc > 0) ? cfg->envp : default_env;
     unsigned int flags = ns_to_clone(cfg->ns_mask);
 
@@ -133,9 +115,14 @@ pid_t esquema_spawn(esquema_config *cfg)
     struct sock_fprog prog_tty = { 0, NULL };
     int have_seccomp = 0;
     if (cfg->seccomp) {
-        if (es_seccomp_compile_tty(&prog_tty) < 0) return -1;    /* es_fail set */
-        if (es_seccomp_compile(&prog) < 0) {
+        if (es_seccomp_compile_tty(&prog_tty) < 0) {
+            close(rootfs_fd); return -1;                         /* es_fail set */
+        }
+        const esquema_seccomp_policy *policy =
+            cfg->has_seccomp_policy ? &cfg->seccomp_policy : NULL;
+        if (es_seccomp_compile(policy, &prog) < 0) {
             es_seccomp_free_program(&prog_tty);
+            close(rootfs_fd);
             return -1;
         }
         have_seccomp = 1;
@@ -144,13 +131,27 @@ pid_t esquema_spawn(esquema_config *cfg)
     int sp[2];
     if (pipe(sp) < 0) {
         if (have_seccomp) { es_seccomp_free_program(&prog); es_seccomp_free_program(&prog_tty); }
+        close(rootfs_fd);
         return (pid_t) es_fail("spawn: pipe");
+    }
+    int ready_pipe[2];
+    if (pipe(ready_pipe) < 0) {
+        int e = errno;
+        close(sp[0]); close(sp[1]); close(rootfs_fd);
+        if (have_seccomp) {
+            es_seccomp_free_program(&prog);
+            es_seccomp_free_program(&prog_tty);
+        }
+        errno = e;
+        return (pid_t) es_fail("spawn: ready pipe");
     }
 
     pid_t a = fork();
     if (a < 0) {
         int e = errno;
         close(sp[0]); close(sp[1]);
+        close(ready_pipe[0]); close(ready_pipe[1]);
+        close(rootfs_fd);
         if (have_seccomp) { es_seccomp_free_program(&prog); es_seccomp_free_program(&prog_tty); }
         errno = e;
         return (pid_t) es_fail("spawn: fork");
@@ -159,11 +160,19 @@ pid_t esquema_spawn(esquema_config *cfg)
     if (a == 0) {
         /* ===================== setup child A ===================== */
         close(sp[1]);
+        close(ready_pipe[0]);
         prctl(PR_SET_PDEATHSIG, SIGKILL);          /* die with P */
         /* Reset SIGCHLD to default: A inherited Guile's dispositions and may
          * have SIG_IGN/SA_NOCLDWAIT, which would auto-reap B and make the
          * waitpid below fail with ECHILD instead of returning B's status. */
         signal(SIGCHLD, SIG_DFL);
+
+        /* esquema_spawn does not return A's pid to its caller until this relay
+         * is live, so an immediate stop request cannot strand B. */
+        if (es_forwarding_prepare() < 0 ||
+            es_write_all(ready_pipe[1], "r", 1) < 0)
+            _exit(ES_EXIT_REAP);
+        close(ready_pipe[1]);
 
         char ch = '\0';
         ssize_t gate;
@@ -191,7 +200,7 @@ pid_t esquema_spawn(esquema_config *cfg)
              * TIOCSTI/TIOCLINUX injection has no target tty (complements the
              * seccomp block). */
             setsid();
-            if (es_setup_mounts(cfg) < 0) _exit(ES_EXIT_MOUNT);
+            if (es_setup_mounts(cfg, rootfs_fd) < 0) _exit(ES_EXIT_MOUNT);
             if ((cfg->ns_mask & ESQUEMA_NS_NET) && es_setup_loopback() < 0 &&
                 cfg->strict)
                 _exit(ES_EXIT_UNSHARE);
@@ -216,6 +225,11 @@ pid_t esquema_spawn(esquema_config *cfg)
                 if (es_seccomp_apply_program(&prog) < 0)     _exit(ES_EXIT_SECCOMP);
             }
 
+            if (cfg->supervise) {
+                int status = es_supervise_exec(cfg->argv, envp,
+                                               cfg->teardown_timeout_ms);
+                _exit(status < 0 ? ES_EXIT_REAP : status);
+            }
             execve(cfg->argv[0], cfg->argv, envp);
             _exit(ES_EXIT_EXEC);
         }
@@ -228,21 +242,30 @@ pid_t esquema_spawn(esquema_config *cfg)
             _exit(ES_EXIT_FDS);
         }
 
-        /* A reaps B and mirrors its status. `st` is initialised so a
-         * non-EINTR waitpid failure can never read indeterminate memory. */
-        int st = 0;
-        for (;;) {
-            pid_t w = waitpid(b, &st, 0);
-            if (w == b) break;
-            if (w < 0 && errno == EINTR) continue;
-            _exit(ES_EXIT_REAP);
-        }
-        if (WIFEXITED(st))  _exit(WEXITSTATUS(st));
-        _exit(128 + WTERMSIG(st));
+        int status = es_wait_forwarding(b);
+        _exit(status < 0 ? ES_EXIT_REAP : status);
     }
 
     /* ========================= parent P ========================= */
     close(sp[0]);
+    close(rootfs_fd);
+    close(ready_pipe[1]);
+
+    char ready = '\0';
+    ssize_t ready_n;
+    do { ready_n = read(ready_pipe[0], &ready, 1); }
+    while (ready_n < 0 && errno == EINTR);
+    close(ready_pipe[0]);
+    if (ready_n != 1 || ready != 'r') {
+        close(sp[1]);
+        while (waitpid(a, NULL, 0) < 0 && errno == EINTR) { }
+        if (have_seccomp) {
+            es_seccomp_free_program(&prog);
+            es_seccomp_free_program(&prog_tty);
+        }
+        errno = EIO;
+        return (pid_t) es_fail("spawn: signal relay");
+    }
 
     char cg_path[PATH_MAX] = { 0 };
     if (cfg->cgroup_name &&
@@ -252,11 +275,11 @@ pid_t esquema_spawn(esquema_config *cfg)
         int cg_rc = es_cgroup_setup(cfg, a, cg_path, sizeof cg_path);
         int cg_errno = errno;
         int store_rc = 0;
-        if (cg_path[0]) store_rc = cg_store(a, cg_path);
+        if (cg_path[0]) store_rc = es_lifecycle_track(a, cg_path);
         if (store_rc < 0 || (cfg->strict && cg_rc < 0)) {
             int failure = store_rc < 0 ? errno : cg_errno;
             /* Do not leave an entry pointing to state we clean synchronously. */
-            char *tracked = cg_take(a);
+            char *tracked = es_lifecycle_take(a);
             if (tracked) free(tracked);
             abort_blocked_child(sp[1], a, cg_path);
             if (have_seccomp) {
@@ -284,11 +307,11 @@ int esquema_wait(pid_t pid)
         if (errno == EINTR) continue;
         /* Preserve the waitpid errno across cleanup's rmdir(). */
         int e = errno;
-        { char *p = cg_take(pid); if (p) { es_cgroup_cleanup(p); free(p); } }
+        { char *p = es_lifecycle_take(pid); if (p) { es_cgroup_cleanup(p); free(p); } }
         errno = e;
         return es_fail("wait");
     }
-    { char *p = cg_take(pid); if (p) { es_cgroup_cleanup(p); free(p); } }
+    { char *p = es_lifecycle_take(pid); if (p) { es_cgroup_cleanup(p); free(p); } }
 
     if (WIFEXITED(st))   return WEXITSTATUS(st);
     if (WIFSIGNALED(st)) return 128 + WTERMSIG(st);

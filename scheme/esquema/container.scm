@@ -14,10 +14,13 @@
             container-hostname
             container-id-map
             container-seccomp?
+            container-seccomp-policy
             container-drop-caps?
             container-rootfs-ro?
             container-strict?
             container-landlock?
+            container-supervise?
+            container-teardown-timeout-ms
             container-preserve-fds
             container-cgroup-name
             container-limits
@@ -26,7 +29,27 @@
             limits-memory-max
             limits-pids-max
             limits-cpu-quota
-            limits-cpu-period))
+            limits-cpu-period
+            make-seccomp-policy
+            seccomp-policy?
+            seccomp-policy-expected-arch
+            seccomp-policy-socket-families
+            seccomp-policy-io-uring
+            seccomp-policy-ioctl
+            fortress-seccomp-policy))
+
+;;; Versioned policy inputs are symbols rather than raw libseccomp constants.
+;;; The serializer in sandbox.scm maps these values to the stable v1 C ABI.
+(define-record-type <seccomp-policy>
+  (make-seccomp-policy expected-arch socket-families io-uring ioctl)
+  seccomp-policy?
+  (expected-arch  seccomp-policy-expected-arch)
+  (socket-families seccomp-policy-socket-families)
+  (io-uring       seccomp-policy-io-uring)
+  (ioctl          seccomp-policy-ioctl))
+
+(define (fortress-seccomp-policy)
+  (make-seccomp-policy 'native '(unix inet inet6) 'deny 'restricted))
 
 ;;; Resource limits (all #f = unset). cpu-quota/period are microseconds.
 (define-record-type <limits>
@@ -40,7 +63,8 @@
 (define-record-type <container>
   (%make-container name rootfs command env mounts namespaces hostname
                    id-map seccomp? drop-caps? rootfs-ro? cgroup-name limits
-                   strict? landlock? preserve-fds)
+                   strict? landlock? preserve-fds seccomp-policy supervise?
+                   teardown-timeout-ms)
   container?
   (name         container-name)
   (rootfs       container-rootfs)
@@ -51,13 +75,16 @@
   (hostname     container-hostname)
   (id-map       container-id-map)      ; (uid . gid) or #f -> current uid/gid
   (seccomp?     container-seccomp?)
+  (seccomp-policy container-seccomp-policy)
   (drop-caps?   container-drop-caps?)
   (rootfs-ro?   container-rootfs-ro?)
   (cgroup-name  container-cgroup-name)
   (limits       container-limits)      ; <limits> or #f
   (strict?      container-strict?)
   (landlock?    container-landlock?)
-  (preserve-fds container-preserve-fds)) ; explicit exec capability FDs
+  (preserve-fds container-preserve-fds) ; explicit exec capability FDs
+  (supervise?   container-supervise?)
+  (teardown-timeout-ms container-teardown-timeout-ms))
 
 ;;; Full keyword constructor with secure-by-default settings.
 (define* (make-container name rootfs command
@@ -74,7 +101,10 @@
                          (limits #f)
                          (strict? #f)
                          (landlock? #t)
-                         (preserve-fds '()))
+                         (preserve-fds '())
+                         (seccomp-policy #f)
+                         (supervise? #f)
+                         (teardown-timeout-ms 2000))
   (unless (string? rootfs) (error "container: rootfs must be a string" rootfs))
   (unless (and (list? command) (every string? command) (pair? command))
     (error "container: command must be a non-empty list of strings" command))
@@ -83,9 +113,19 @@
                       preserve-fds))
     (error "container: preserve-fds must contain descriptors >= 3"
            preserve-fds))
-  (%make-container name rootfs command env mounts namespaces hostname
-                   id-map seccomp? drop-caps? rootfs-ro? cgroup-name limits
-                   strict? landlock? preserve-fds))
+  (when (and seccomp-policy (not (seccomp-policy? seccomp-policy)))
+    (error "container: seccomp-policy must be a <seccomp-policy> or #f"
+           seccomp-policy))
+  (unless (and (integer? teardown-timeout-ms)
+               (<= 1 teardown-timeout-ms 60000))
+    (error "container: teardown timeout must be 1..60000 ms"
+           teardown-timeout-ms))
+  (let ((effective-policy
+         (or seccomp-policy (and strict? (fortress-seccomp-policy)))))
+    (%make-container name rootfs command env mounts namespaces hostname
+                     id-map seccomp? drop-caps? rootfs-ro? cgroup-name limits
+                     strict? landlock? preserve-fds effective-policy
+                     (or strict? supervise?) teardown-timeout-ms)))
 
 ;;; Back-compat: the original three-argument positional constructor.
 (define (container name rootfs command)

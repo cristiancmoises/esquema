@@ -23,10 +23,12 @@
             esquema-config-set-namespaces
             esquema-config-set-id-map
             esquema-config-set-seccomp
+            esquema-config-set-seccomp-policy-v1
             esquema-config-set-drop-caps
             esquema-config-set-rootfs-ro
             esquema-config-set-strict
             esquema-config-set-landlock
+            esquema-config-set-supervisor
             esquema-config-set-memory-max
             esquema-config-set-pids-max
             esquema-config-set-cpu-max
@@ -99,10 +101,15 @@
 (define %cfg-ns         (c-fn "esquema_config_set_namespaces" void (list '* unsigned-int)))
 (define %cfg-idmap      (c-fn "esquema_config_set_id_map" void (list '* unsigned-int unsigned-int)))
 (define %cfg-seccomp    (c-fn "esquema_config_set_seccomp" void (list '* int)))
+(define %cfg-seccomp-v1 (c-fn "esquema_config_set_seccomp_policy_v1" int
+                              (list '* unsigned-int uint64
+                                    unsigned-int unsigned-int)))
 (define %cfg-dropcaps   (c-fn "esquema_config_set_drop_caps" void (list '* int)))
 (define %cfg-rootfs-ro  (c-fn "esquema_config_set_rootfs_ro" void (list '* int)))
 (define %cfg-strict     (c-fn "esquema_config_set_strict" void (list '* int)))
 (define %cfg-landlock   (c-fn "esquema_config_set_landlock" void (list '* int)))
+(define %cfg-supervisor (c-fn "esquema_config_set_supervisor" int
+                              (list '* int unsigned-int)))
 (define %cfg-mem        (c-fn "esquema_config_set_memory_max" void (list '* long)))
 (define %cfg-pids       (c-fn "esquema_config_set_pids_max" void (list '* long)))
 (define %cfg-cpu        (c-fn "esquema_config_set_cpu_max" void (list '* long long)))
@@ -120,10 +127,14 @@
 (define (esquema-config-set-namespaces c mask) (%cfg-ns c mask))
 (define (esquema-config-set-id-map c uid gid) (%cfg-idmap c uid gid))
 (define (esquema-config-set-seccomp c on) (%cfg-seccomp c (if on 1 0)))
+(define (esquema-config-set-seccomp-policy-v1 c arch sockets io-uring ioctl)
+  (%cfg-seccomp-v1 c arch sockets io-uring ioctl))
 (define (esquema-config-set-drop-caps c on) (%cfg-dropcaps c (if on 1 0)))
 (define (esquema-config-set-rootfs-ro c on) (%cfg-rootfs-ro c (if on 1 0)))
 (define (esquema-config-set-strict c on) (%cfg-strict c (if on 1 0)))
 (define (esquema-config-set-landlock c on) (%cfg-landlock c (if on 1 0)))
+(define (esquema-config-set-supervisor c on timeout-ms)
+  (%cfg-supervisor c (if on 1 0) timeout-ms))
 (define (esquema-config-set-memory-max c n) (%cfg-mem c n))
 (define (esquema-config-set-pids-max c n) (%cfg-pids c n))
 (define (esquema-config-set-cpu-max c q p) (%cfg-cpu c q p))

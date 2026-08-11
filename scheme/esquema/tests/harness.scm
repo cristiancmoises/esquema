@@ -75,6 +75,9 @@
                      (drop-caps? #t)
                      (strict? #f)
                      (landlock? #t)
+                     (seccomp-policy #f)
+                     (supervise? #f)
+                     (teardown-timeout-ms 2000)
                      (env '(("PATH" . "/bin")))
                      (mounts '())
                      (preserve-fds '()))
@@ -87,6 +90,9 @@
                             #:drop-caps? drop-caps?
                             #:strict? strict?
                             #:landlock? landlock?
+                            #:seccomp-policy seccomp-policy
+                            #:supervise? supervise?
+                            #:teardown-timeout-ms teardown-timeout-ms
                             #:env env
                             #:mounts mounts
                             #:preserve-fds preserve-fds))
@@ -111,6 +117,9 @@
                      (rootfs-ro? #f)
                      (strict? #f)
                      (landlock? #t)
+                     (seccomp-policy #f)
+                     (supervise? #f)
+                     (teardown-timeout-ms 2000)
                      (env '(("PATH" . "/bin")))
                      (mounts '())
                      (preserve-fds '()))
@@ -122,6 +131,9 @@
                    #:rootfs-ro? rootfs-ro?
                    #:strict? strict?
                    #:landlock? landlock?
+                   #:seccomp-policy seccomp-policy
+                   #:supervise? supervise?
+                   #:teardown-timeout-ms teardown-timeout-ms
                    #:env env
                    #:mounts mounts
                    #:preserve-fds preserve-fds)))

@@ -3,6 +3,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -42,6 +43,21 @@ static int set_field(char **field, const char *value)
     return 0;
 }
 
+static int bind_destination_ok(const char *dst)
+{
+    if (!dst || !dst[0] || dst[0] == '/' || strlen(dst) >= PATH_MAX) return 0;
+    const char *segment = dst;
+    for (;;) {
+        const char *slash = strchr(segment, '/');
+        size_t len = slash ? (size_t) (slash - segment) : strlen(segment);
+        if (len == 0 || (len == 1 && segment[0] == '.') ||
+            (len == 2 && segment[0] == '.' && segment[1] == '.'))
+            return 0;
+        if (!slash) return 1;
+        segment = slash + 1;
+    }
+}
+
 esquema_config *esquema_config_new(void)
 {
     esquema_config *c = calloc(1, sizeof *c);
@@ -54,6 +70,9 @@ esquema_config *esquema_config_new(void)
     c->rootfs_ro     = 0;
     c->strict        = 0;
     c->landlock      = 1;
+    c->supervise     = 0;
+    c->teardown_timeout_ms = 2000;
+    c->has_seccomp_policy = 0;
     c->memory_max    = -1;
     c->pids_max      = -1;
     c->cpu_quota_us  = -1;
@@ -112,6 +131,9 @@ int esquema_config_add_bind(esquema_config *cfg, const char *src,
                             const char *dst, int read_only)
 {
     if (!cfg || !src || !dst) { errno = EINVAL; return es_fail("add_bind"); }
+    if (!bind_destination_ok(dst)) {
+        errno = EINVAL; return es_fail("add_bind: unsafe destination");
+    }
     if (cfg->binds_n + 1 > cfg->binds_cap) {
         size_t ncap = cfg->binds_cap ? cfg->binds_cap * 2 : 4;
         struct esquema_bind *nb = realloc(cfg->binds, ncap * sizeof *nb);
@@ -187,6 +209,51 @@ void esquema_config_set_strict(esquema_config *cfg, int enable)
 void esquema_config_set_landlock(esquema_config *cfg, int enable)
 {
     if (cfg) cfg->landlock = enable ? 1 : 0;
+}
+
+int esquema_config_set_supervisor(esquema_config *cfg, int enable,
+                                  unsigned int timeout_ms)
+{
+    if (!cfg || (enable && (timeout_ms == 0 || timeout_ms > 60000))) {
+        errno = EINVAL; return es_fail("set_supervisor");
+    }
+    cfg->supervise = enable ? 1 : 0;
+    if (enable) cfg->teardown_timeout_ms = timeout_ms;
+    return 0;
+}
+
+int esquema_config_set_seccomp_policy(esquema_config *cfg,
+                                      const esquema_seccomp_policy *policy)
+{
+    if (!cfg || !policy ||
+        policy->version != ESQUEMA_SECCOMP_POLICY_VERSION ||
+        policy->size != sizeof *policy ||
+        policy->expected_arch > ESQUEMA_ARCH_AARCH64 ||
+        policy->io_uring > ESQUEMA_IO_URING_ALLOW ||
+        policy->ioctl_policy > ESQUEMA_IOCTL_LEGACY ||
+        policy->flags != 0 ||
+        (policy->socket_families & ~ESQUEMA_SOCKET_ALL) != 0 ||
+        policy->reserved[0] != 0 || policy->reserved[1] != 0) {
+        errno = EINVAL; return es_fail("set_seccomp_policy");
+    }
+    cfg->seccomp_policy = *policy;
+    cfg->has_seccomp_policy = 1;
+    return 0;
+}
+
+int esquema_config_set_seccomp_policy_v1(esquema_config *cfg,
+                                         uint32_t expected_arch,
+                                         uint64_t socket_families,
+                                         uint32_t io_uring,
+                                         uint32_t ioctl_policy)
+{
+    esquema_seccomp_policy policy;
+    esquema_seccomp_policy_init(&policy);
+    policy.expected_arch = expected_arch;
+    policy.socket_families = socket_families;
+    policy.io_uring = io_uring;
+    policy.ioctl_policy = ioctl_policy;
+    return esquema_config_set_seccomp_policy(cfg, &policy);
 }
 
 void esquema_config_set_memory_max(esquema_config *cfg, long bytes)

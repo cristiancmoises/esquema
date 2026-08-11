@@ -12,9 +12,12 @@
 
 #include <errno.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 #include <sched.h>
+#include <stdint.h>
 #include <seccomp.h>
+#include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
@@ -68,11 +71,11 @@ static const char *const ALLOW[] = {
     "poll", "ppoll", "select", "pselect6", "epoll_create", "epoll_create1",
     "epoll_ctl", "epoll_wait", "epoll_pwait", "epoll_pwait2",
     "eventfd", "eventfd2", "pipe", "pipe2", "splice", "tee", "vmsplice",
-    "sendfile", "copy_file_range", "ioctl", "fadvise64",
+    "sendfile", "copy_file_range", "fadvise64",
     "inotify_init1", "inotify_add_watch", "inotify_rm_watch", "memfd_create",
     /* network (confined to the container's own net namespace) */
-    "socket", "socketpair", "bind", "listen", "accept", "accept4",
-    "connect", "getsockname", "getpeername", "getsockopt", "setsockopt",
+    "bind", "listen", "accept", "accept4", "connect", "getsockname",
+    "getpeername", "getsockopt", "setsockopt",
     "sendto", "recvfrom", "sendmsg", "recvmsg", "sendmmsg", "recvmmsg",
     "shutdown",
     /* time / rng / info */
@@ -90,8 +93,159 @@ static const char *const ALLOW[] = {
     "syncfs", "sync_file_range", NULL
 };
 
+void esquema_seccomp_policy_init(esquema_seccomp_policy *policy)
+{
+    if (!policy) return;
+    memset(policy, 0, sizeof *policy);
+    policy->version = ESQUEMA_SECCOMP_POLICY_VERSION;
+    policy->size = sizeof *policy;
+    policy->expected_arch = ESQUEMA_ARCH_NATIVE;
+    policy->io_uring = ESQUEMA_IO_URING_DENY;
+    policy->ioctl_policy = ESQUEMA_IOCTL_RESTRICTED;
+    policy->socket_families =
+        ESQUEMA_SOCKET_UNIX | ESQUEMA_SOCKET_INET | ESQUEMA_SOCKET_INET6;
+}
+
+static uint32_t native_policy_arch(void)
+{
+    uint32_t arch = seccomp_arch_native();
+    if (arch == SCMP_ARCH_X86_64) return ESQUEMA_ARCH_X86_64;
+    if (arch == SCMP_ARCH_AARCH64) return ESQUEMA_ARCH_AARCH64;
+    return UINT32_MAX;
+}
+
+static int validate_policy_arch(const esquema_seccomp_policy *policy)
+{
+    if (!policy) return 0;                 /* compatibility policy */
+    if (policy->version != ESQUEMA_SECCOMP_POLICY_VERSION ||
+        policy->size != sizeof *policy) {
+        errno = EINVAL; return -1;
+    }
+    uint32_t native = native_policy_arch();
+    if (native == UINT32_MAX) { errno = EAFNOSUPPORT; return -1; }
+    if (policy->expected_arch != ESQUEMA_ARCH_NATIVE &&
+        policy->expected_arch != native) {
+        errno = EPROTONOSUPPORT; return -1;
+    }
+    return 0;
+}
+
+static int add_allow_name(scmp_filter_ctx ctx, const char *name)
+{
+    int syscall_nr = seccomp_syscall_resolve_name(name);
+    if (syscall_nr == __NR_SCMP_ERROR) return 0;
+    int rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, syscall_nr, 0);
+    if (rc < 0 && rc != -EEXIST) { errno = -rc; return -1; }
+    return 0;
+}
+
+static int add_kill_name(scmp_filter_ctx ctx, const char *name)
+{
+    int syscall_nr = seccomp_syscall_resolve_name(name);
+    if (syscall_nr == __NR_SCMP_ERROR) return 0;
+    int rc = seccomp_rule_add(ctx, SCMP_ACT_KILL_PROCESS, syscall_nr, 0);
+    if (rc < 0 && rc != -EEXIST) { errno = -rc; return -1; }
+    return 0;
+}
+
+static int add_socket_family(scmp_filter_ctx ctx, int syscall_nr, int family)
+{
+    if (syscall_nr == __NR_SCMP_ERROR) return 0;
+    struct scmp_arg_cmp cmp = {
+        .arg = 0,
+        .op = SCMP_CMP_EQ,
+        .datum_a = (scmp_datum_t) (unsigned int) family,
+        .datum_b = 0
+    };
+    int rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, syscall_nr, 1, cmp);
+    if (rc < 0 && rc != -EEXIST) { errno = -rc; return -1; }
+    return 0;
+}
+
+static int add_policy_sockets(scmp_filter_ctx ctx,
+                              const esquema_seccomp_policy *policy)
+{
+    int socket_nr = seccomp_syscall_resolve_name("socket");
+    int pair_nr = seccomp_syscall_resolve_name("socketpair");
+    if (!policy) {
+        if (add_allow_name(ctx, "socket") < 0 ||
+            add_allow_name(ctx, "socketpair") < 0)
+            return -1;
+        return 0;
+    }
+    struct family_map { uint64_t bit; int family; } families[] = {
+        { ESQUEMA_SOCKET_UNIX, AF_UNIX },
+        { ESQUEMA_SOCKET_INET, AF_INET },
+        { ESQUEMA_SOCKET_INET6, AF_INET6 },
+        { ESQUEMA_SOCKET_NETLINK, AF_NETLINK },
+#ifdef AF_VSOCK
+        { ESQUEMA_SOCKET_VSOCK, AF_VSOCK },
+#endif
+    };
+    for (size_t i = 0; i < sizeof families / sizeof families[0]; i++) {
+        if (!(policy->socket_families & families[i].bit)) continue;
+        if (add_socket_family(ctx, socket_nr, families[i].family) < 0)
+            return -1;
+        /* Linux only supports useful socketpair semantics for AF_UNIX among
+         * the families exposed by this v1 policy. */
+        if (families[i].family == AF_UNIX &&
+            add_socket_family(ctx, pair_nr, AF_UNIX) < 0)
+            return -1;
+    }
+    return 0;
+}
+
+static int add_policy_io_uring(scmp_filter_ctx ctx,
+                               const esquema_seccomp_policy *policy)
+{
+    if (!policy) return 0;                  /* legacy ENOSYS default */
+    static const char *const calls[] = {
+        "io_uring_setup", "io_uring_enter", "io_uring_register", NULL
+    };
+    for (size_t i = 0; calls[i]; i++) {
+        int rc = policy->io_uring == ESQUEMA_IO_URING_ALLOW
+                 ? add_allow_name(ctx, calls[i])
+                 : add_kill_name(ctx, calls[i]);
+        if (rc < 0) return -1;
+    }
+    return 0;
+}
+
+static int add_ioctl_request(scmp_filter_ctx ctx, int syscall_nr,
+                             unsigned long request)
+{
+    struct scmp_arg_cmp cmp = {
+        .arg = 1,
+        .op = SCMP_CMP_EQ,
+        .datum_a = (scmp_datum_t) request,
+        .datum_b = 0
+    };
+    int rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, syscall_nr, 1, cmp);
+    if (rc < 0 && rc != -EEXIST) { errno = -rc; return -1; }
+    return 0;
+}
+
+static int add_policy_ioctls(scmp_filter_ctx ctx,
+                             const esquema_seccomp_policy *policy)
+{
+    if (!policy || policy->ioctl_policy == ESQUEMA_IOCTL_LEGACY)
+        return add_allow_name(ctx, "ioctl");
+    if (policy->ioctl_policy == ESQUEMA_IOCTL_NONE) return 0;
+
+    int ioctl_nr = seccomp_syscall_resolve_name("ioctl");
+    if (ioctl_nr == __NR_SCMP_ERROR) return 0;
+    static const unsigned long safe_requests[] = {
+        FIOCLEX, FIONCLEX, FIONBIO, FIONREAD,
+        TCGETS, TCSETS, TCSETSW, TCSETSF, TIOCGWINSZ, TIOCSWINSZ
+    };
+    for (size_t i = 0; i < sizeof safe_requests / sizeof safe_requests[0]; i++)
+        if (add_ioctl_request(ctx, ioctl_nr, safe_requests[i]) < 0) return -1;
+    return 0;
+}
+
 /* Populate ctx with the deny-set, allow-set and BADARCH policy. */
-static int build_main_rules(scmp_filter_ctx ctx)
+static int build_main_rules(scmp_filter_ctx ctx,
+                            const esquema_seccomp_policy *policy)
 {
     int rc = seccomp_attr_set(ctx, SCMP_FLTATR_ACT_BADARCH,
                               SCMP_ACT_KILL_PROCESS);
@@ -110,6 +264,10 @@ static int build_main_rules(scmp_filter_ctx ctx)
         /* EEXIST: name already covered by an alias — not fatal. */
         if (rc < 0 && rc != -EEXIST) { errno = -rc; return -1; }
     }
+    if (add_policy_sockets(ctx, policy) < 0 ||
+        add_policy_io_uring(ctx, policy) < 0 ||
+        add_policy_ioctls(ctx, policy) < 0)
+        return -1;
 
     /* clone: permit fork()/pthread_create() but NOT namespace creation or
      * capability re-gain — allow only when no CLONE_NEW* flag is set (arg0).
@@ -199,6 +357,13 @@ static int load_ctx(scmp_filter_ctx ctx)
 /* ---- apply directly to the current thread (standalone / tests) ------- */
 int esquema_apply_seccomp(void)
 {
+    return esquema_apply_seccomp_policy(NULL);
+}
+
+int esquema_apply_seccomp_policy(const esquema_seccomp_policy *policy)
+{
+    if (validate_policy_arch(policy) < 0)
+        return es_fail("seccomp: policy architecture");
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0)
         return es_fail("seccomp: no_new_privs");
 
@@ -212,7 +377,7 @@ int esquema_apply_seccomp(void)
 
     scmp_filter_ctx ctx = seccomp_init(SCMP_ACT_ERRNO(ENOSYS));
     if (!ctx) { errno = ENOMEM; return es_fail("seccomp: init"); }
-    if (build_main_rules(ctx) < 0 || load_ctx(ctx) < 0) {
+    if (build_main_rules(ctx, policy) < 0 || load_ctx(ctx) < 0) {
         seccomp_release(ctx); return es_fail("seccomp: main");
     }
     seccomp_release(ctx);
@@ -220,11 +385,16 @@ int esquema_apply_seccomp(void)
 }
 
 /* ---- compile in parent, apply in child ------------------------------- */
-int es_seccomp_compile(struct sock_fprog *out)
+int es_seccomp_compile(const esquema_seccomp_policy *policy,
+                       struct sock_fprog *out)
 {
+    if (validate_policy_arch(policy) < 0)
+        return es_fail("seccomp: policy architecture");
     scmp_filter_ctx ctx = seccomp_init(SCMP_ACT_ERRNO(ENOSYS));
     if (!ctx) { errno = ENOMEM; return es_fail("seccomp: init"); }
-    if (build_main_rules(ctx) < 0) { seccomp_release(ctx); return es_fail("seccomp: rules"); }
+    if (build_main_rules(ctx, policy) < 0) {
+        seccomp_release(ctx); return es_fail("seccomp: rules");
+    }
     int rc = export_ctx(ctx, out);
     seccomp_release(ctx);
     return rc;

@@ -12,6 +12,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <pthread.h>
 #include <unistd.h>
 #include <signal.h>
 #include <sched.h>
@@ -19,6 +20,7 @@
 #include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <linux/capability.h>
 
@@ -96,6 +98,159 @@ static void child_fork_allowed(void)
     if (p < 0) _exit(81);
     int st; waitpid(p, &st, 0);
     _exit((WIFEXITED(st) && WEXITSTATUS(st) == 0) ? 0 : 82);
+}
+
+static void child_policy_socket_allowed(void)
+{
+    esquema_seccomp_policy policy;
+    esquema_seccomp_policy_init(&policy);
+    policy.socket_families = ESQUEMA_SOCKET_UNIX;
+    if (esquema_apply_seccomp_policy(&policy) < 0) _exit(50);
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) _exit(83);
+    close(fd);
+    _exit(0);
+}
+
+static void child_policy_socket_forbidden(void)
+{
+    esquema_seccomp_policy policy;
+    esquema_seccomp_policy_init(&policy);
+    policy.socket_families = ESQUEMA_SOCKET_UNIX;
+    if (esquema_apply_seccomp_policy(&policy) < 0) _exit(50);
+    errno = 0;
+    int fd = socket(AF_PACKET, SOCK_RAW | SOCK_CLOEXEC, 0);
+    if (fd >= 0) { close(fd); _exit(84); }
+    _exit(errno == ENOSYS ? 0 : 85);
+}
+
+static void child_policy_ioctl_restricted(void)
+{
+    esquema_seccomp_policy policy;
+    esquema_seccomp_policy_init(&policy);
+    if (esquema_apply_seccomp_policy(&policy) < 0) _exit(50);
+    int fds[2];
+    if (pipe(fds) < 0) _exit(86);
+    int available = -1;
+    if (ioctl(fds[0], FIONREAD, &available) < 0) _exit(87);
+    errno = 0;
+    if (ioctl(fds[0], 0xdeadbeefUL, 0) != -1 || errno != ENOSYS) _exit(88);
+    close(fds[0]); close(fds[1]);
+    _exit(0);
+}
+
+static void child_policy_denied_ptrace(void)
+{
+    esquema_seccomp_policy policy;
+    esquema_seccomp_policy_init(&policy);
+    if (esquema_apply_seccomp_policy(&policy) < 0) _exit(50);
+    syscall(SYS_ptrace, 0, 0, 0, 0);
+    _exit(0);
+}
+
+#ifdef SYS_io_uring_setup
+static void child_policy_io_uring_denied(void)
+{
+    esquema_seccomp_policy policy;
+    esquema_seccomp_policy_init(&policy);
+    if (esquema_apply_seccomp_policy(&policy) < 0) _exit(50);
+    syscall(SYS_io_uring_setup, 1, NULL);
+    _exit(0);
+}
+#endif
+
+static int test_policy_arch_mismatch(void)
+{
+    esquema_seccomp_policy policy;
+    esquema_seccomp_policy_init(&policy);
+#if defined(__x86_64__)
+    policy.expected_arch = ESQUEMA_ARCH_AARCH64;
+#elif defined(__aarch64__)
+    policy.expected_arch = ESQUEMA_ARCH_X86_64;
+#else
+    return 1; /* the runtime validator reports unsupported; no false match */
+#endif
+    struct sock_fprog program = { 0, NULL };
+    errno = 0;
+    int rc = es_seccomp_compile(&policy, &program);
+    es_seccomp_free_program(&program);
+    return rc == -1 && errno == EPROTONOSUPPORT;
+}
+
+static int test_dynamic_lifecycle_registry(void)
+{
+    enum { records = 96 };
+    int tracked = 0;
+    int ok = 1;
+    for (int i = 0; i < records; i++) {
+        char path[64];
+        snprintf(path, sizeof path, "/tmp/esq-cgroup-%d", i);
+        if (es_lifecycle_track((pid_t) (100000 + i), path) < 0) {
+            ok = 0; break;
+        }
+        tracked++;
+    }
+    if (es_lifecycle_count() != (size_t) tracked || tracked != records) ok = 0;
+    for (int i = 0; i < tracked; i++) {
+        char expected[64];
+        snprintf(expected, sizeof expected, "/tmp/esq-cgroup-%d", i);
+        char *path = es_lifecycle_take((pid_t) (100000 + i));
+        if (!path || strcmp(path, expected) != 0) ok = 0;
+        free(path);
+    }
+    if (es_lifecycle_count() != 0) ok = 0;
+    return ok;
+}
+
+enum { lifecycle_threads = 8, lifecycle_per_thread = 64 };
+
+struct lifecycle_thread_args {
+    int index;
+    int ok;
+};
+
+static void *lifecycle_thread(void *opaque)
+{
+    struct lifecycle_thread_args *args = opaque;
+    args->ok = 1;
+    int tracked = 0;
+    for (int i = 0; i < lifecycle_per_thread; i++) {
+        char path[64];
+        snprintf(path, sizeof path, "/tmp/esq-thread-%d-%d", args->index, i);
+        pid_t pid = (pid_t) (200000 + args->index * 100 + i);
+        if (es_lifecycle_track(pid, path) < 0) {
+            args->ok = 0; break;
+        }
+        tracked++;
+    }
+    for (int i = 0; i < tracked; i++) {
+        pid_t pid = (pid_t) (200000 + args->index * 100 + i);
+        char *path = es_lifecycle_take(pid);
+        if (!path) args->ok = 0;
+        free(path);
+    }
+    return NULL;
+}
+
+static int test_cross_thread_lifecycle_registry(void)
+{
+    pthread_t threads[lifecycle_threads];
+    struct lifecycle_thread_args args[lifecycle_threads];
+    int created = 0;
+    int ok = 1;
+    for (int i = 0; i < lifecycle_threads; i++) {
+        args[i].index = i;
+        args[i].ok = 0;
+        if (pthread_create(&threads[i], NULL, lifecycle_thread, &args[i]) != 0)
+            break;
+        created++;
+    }
+    if (created != lifecycle_threads) ok = 0;
+    for (int i = 0; i < created; i++) {
+        if (pthread_join(threads[i], NULL) != 0 || !args[i].ok) ok = 0;
+    }
+    if (es_lifecycle_count() != 0) ok = 0;
+    return ok;
 }
 
 /* Drops all caps, then verifies the sets are empty and NNP is set.
@@ -184,10 +339,14 @@ static int test_strict_cgroup_failure(int *clean_teardown)
 {
     esquema_config *cfg = esquema_config_new();
     if (!cfg) return 0;
+    esquema_seccomp_policy policy;
+    esquema_seccomp_policy_init(&policy);
     int configured =
         esquema_config_set_rootfs(cfg, "/") == 0 &&
         esquema_config_add_arg(cfg, "/bin/false") == 0 &&
-        esquema_config_set_cgroup_name(cfg, "invalid/name") == 0;
+        esquema_config_set_cgroup_name(cfg, "invalid/name") == 0 &&
+        esquema_config_set_seccomp_policy(cfg, &policy) == 0 &&
+        esquema_config_set_supervisor(cfg, 1, 100) == 0;
     esquema_config_set_memory_max(cfg, 4096);
     esquema_config_set_strict(cfg, 1);
     pid_t pid = configured ? esquema_spawn(cfg) : -2;
@@ -241,6 +400,39 @@ int main(void)
               WIFEXITED(st) && WEXITSTATUS(st) == 0);
     }
 
+    /* ---- versioned policy: architecture + syscall sub-policies ---- */
+    check("seccomp v1: runtime architecture mismatch rejected",
+          test_policy_arch_mismatch());
+    {
+        int st = run_child(child_policy_socket_allowed);
+        check("seccomp v1: allowlisted AF_UNIX socket permitted",
+              WIFEXITED(st) && WEXITSTATUS(st) == 0);
+    }
+    {
+        int st = run_child(child_policy_socket_forbidden);
+        check("seccomp v1: non-allowlisted AF_PACKET socket refused",
+              WIFEXITED(st) && WEXITSTATUS(st) == 0);
+    }
+    {
+        int st = run_child(child_policy_ioctl_restricted);
+        check("seccomp v1: safe ioctl allowed, unknown request refused",
+              WIFEXITED(st) && WEXITSTATUS(st) == 0);
+    }
+    {
+        int st = run_child(child_policy_denied_ptrace);
+        check("seccomp v1: invariant ptrace deny cannot be removed",
+              WIFSIGNALED(st) && WTERMSIG(st) == SIGSYS);
+    }
+#ifdef SYS_io_uring_setup
+    {
+        int st = run_child(child_policy_io_uring_denied);
+        check("seccomp v1: io_uring deny policy kills setup",
+              WIFSIGNALED(st) && WTERMSIG(st) == SIGSYS);
+    }
+#else
+    printf("BLOCKED seccomp v1 io_uring test: SYS_io_uring_setup unavailable\n");
+#endif
+
     /* ---- capability drop ---- */
     {
         int st = run_child(child_dropcaps);
@@ -279,6 +471,37 @@ int main(void)
           esquema_enter_cgroup("a/b") == -1);
     check("enter_cgroup rejects empty name",
           esquema_enter_cgroup("") == -1);
+    {
+        esquema_config *cfg = esquema_config_new();
+        check("bind destination rejects absolute paths",
+              cfg && esquema_config_add_bind(cfg, "/tmp", "/escape", 1) == -1);
+        check("bind destination rejects parent traversal",
+              cfg && esquema_config_add_bind(cfg, "/tmp", "tmp/../escape", 1) == -1);
+        check("bind destination rejects empty path segments",
+              cfg && esquema_config_add_bind(cfg, "/tmp", "tmp//escape", 1) == -1);
+        esquema_seccomp_policy policy;
+        esquema_seccomp_policy_init(&policy);
+        policy.version++;
+        check("seccomp policy rejects an unknown version",
+              cfg && esquema_config_set_seccomp_policy(cfg, &policy) == -1);
+        esquema_seccomp_policy_init(&policy);
+        policy.size--;
+        check("seccomp policy rejects a noncanonical structure size",
+              cfg && esquema_config_set_seccomp_policy(cfg, &policy) == -1);
+        esquema_seccomp_policy_init(&policy);
+        policy.socket_families = ESQUEMA_SOCKET_ALL | (1ULL << 32);
+        check("seccomp policy rejects unknown socket-family bits",
+              cfg && esquema_config_set_seccomp_policy(cfg, &policy) == -1);
+        esquema_seccomp_policy_init(&policy);
+        policy.reserved[0] = 1;
+        check("seccomp policy rejects nonzero reserved fields",
+              cfg && esquema_config_set_seccomp_policy(cfg, &policy) == -1);
+        esquema_config_free(cfg);
+    }
+    check("lifecycle registry tracks and removes more than 64 launches",
+          test_dynamic_lifecycle_registry());
+    check("lifecycle registry is safe across broker threads",
+          test_cross_thread_lifecycle_registry());
 
     printf("\n%d C check(s) failed\n", failures);
     return failures ? 1 : 0;

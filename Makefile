@@ -59,7 +59,7 @@ test-perf: lib
 
 ## test-c: C-level primitive tests (seccomp SIGSYS kill, cap drop, validation)
 test-c: lib
-	$(CC) -std=gnu11 -Wall -Wextra -O2 -I c \
+	$(CC) -std=gnu11 -Wall -Wextra -O2 -pthread -I c \
 	  $(TEST_DIR)/c/test_primitives.c -L. -lesquema -o .test_primitives
 	LD_LIBRARY_PATH=$(CURDIR) ./.test_primitives
 	rm -f .test_primitives
@@ -83,7 +83,7 @@ sanitize:
 	$(CC) $(CSTD) $(WARN) -fPIC -g -O1 \
 	  -fsanitize=address,undefined -fno-omit-frame-pointer \
 	  $(SECCOMP_CFLAGS) $(SRCS) -shared -o libesquema-asan.so $(LDLIBS)
-	$(CC) -std=gnu11 -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer \
+	$(CC) -std=gnu11 -g -O1 -pthread -fsanitize=address,undefined -fno-omit-frame-pointer \
 	  -I c $(TEST_DIR)/c/test_primitives.c libesquema-asan.so $(SECCOMP_LIBS) \
 	  -o .test_primitives_asan
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 \
