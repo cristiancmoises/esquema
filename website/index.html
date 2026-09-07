@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width,initial-scale=1,viewport-fit=cover" name="viewport"/>
+<meta content="Esquema 0.3.0: rootless Linux containers in Guile Scheme, strict policies, source installation and English/Brazilian Portuguese documentation." name="description"/>
+<meta content="#000000" name="theme-color"/>
+<meta content="dark" name="color-scheme"/>
+<meta content="no-referrer" name="referrer"/>
+<meta content="default-src 'none'; script-src 'none'; style-src 'sha256-XdHseDi4JeEfPmuOtskcvuhWz6zaRdy8Mkv7oBWMIk8='; img-src data:; font-src 'none'; connect-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; manifest-src 'none'; base-uri 'none'; form-action 'none'" http-equiv="Content-Security-Policy"/>
+<title>Esquema 0.3.0 — Guile-native Linux containers</title>
+<link href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23000'/%3E%3Cpath d='M32 6 55 19v26L32 58 9 45V19Z' fill='none' stroke='%2300ffff' stroke-width='4'/%3E%3Cpath d='m20 24 12-7 12 7v16l-12 7-12-7Z' fill='%2300ffff' fill-opacity='.12' stroke='%2300ffff' stroke-width='2'/%3E%3C/svg%3E" rel="icon"/>
+<style>:root{
+  color-scheme:dark;
+  --bg:#000;
+  --bg-soft:#020707;
+  --panel:#041010;
+  --panel-2:#061717;
+  --panel-3:#071d1d;
+  --line:#0d3a3a;
+  --line-strong:#116565;
+  --cyan:#00ffff;
+  --cyan-2:#33e6e6;
+  --cyan-3:#7ff7f7;
+  --teal:#00b8b8;
+  --green:#4dffb8;
+  --ink:#e8ffff;
+  --muted:#91b8b8;
+  --faint:#587474;
+  --warn:#ffd166;
+  --danger:#ff7b9c;
+  --max:1180px;
+  --radius:18px;
+  --mono:ui-monospace,"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;
+  --sans:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:88px;background:var(--bg);max-width:100%;overflow-x:hidden}
+body{
+  margin:0;
+  min-width:300px;
+  overflow-x:hidden;
+  background:
+    radial-gradient(circle at 78% 10%,rgba(0,255,255,.09),transparent 24rem),
+    radial-gradient(circle at 12% 24%,rgba(0,184,184,.07),transparent 25rem),
+    var(--bg);
+  color:var(--ink);
+  font-family:var(--sans);
+  line-height:1.65;
+  text-rendering:optimizeLegibility;
+  -webkit-font-smoothing:antialiased;
+  isolation:isolate;
+}
+body::before{
+  content:"";
+  position:fixed;
+  inset:-80px;
+  z-index:-2;
+  pointer-events:none;
+  opacity:.23;
+  background-image:
+    linear-gradient(rgba(0,255,255,.055) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(0,255,255,.055) 1px,transparent 1px);
+  background-size:52px 52px;
+  mask-image:linear-gradient(to bottom,black,transparent 88%);
+  animation:grid-drift 28s linear infinite;
+}
+body::after{
+  content:"";
+  position:fixed;
+  inset:0;
+  z-index:20;
+  pointer-events:none;
+  opacity:.12;
+  background:repeating-linear-gradient(to bottom,transparent 0,transparent 3px,rgba(0,255,255,.06) 4px);
+  mix-blend-mode:screen;
+}
+@keyframes grid-drift{to{transform:translate3d(52px,52px,0)}}
+@keyframes pulse-ring{0%{box-shadow:0 0 0 0 rgba(77,255,184,.45)}70%{box-shadow:0 0 0 11px rgba(77,255,184,0)}100%{box-shadow:0 0 0 0 rgba(77,255,184,0)}}
+@keyframes cursor-blink{0%,45%{opacity:1}46%,100%{opacity:0}}
+@keyframes scan{0%{transform:translateY(-120%)}100%{transform:translateY(720%)}}
+@keyframes border-glow{0%,100%{border-color:rgba(0,255,255,.24);box-shadow:0 0 0 rgba(0,255,255,0)}50%{border-color:rgba(0,255,255,.62);box-shadow:0 0 30px rgba(0,255,255,.08)}}
+@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-7px)}}
+::selection{background:var(--cyan);color:#001414}
+a{color:inherit}
+a:focus-visible,summary:focus-visible{outline:2px solid var(--cyan);outline-offset:4px;border-radius:5px}
+.skip-link{position:fixed;left:16px;top:-80px;z-index:100;background:var(--cyan);color:#001414;padding:10px 14px;border-radius:8px;font-family:var(--mono);font-weight:800;text-decoration:none}
+.skip-link:focus{top:16px}
+.shell{width:min(var(--max),calc(100% - 40px));margin-inline:auto}
+.site-header{
+  position:sticky;
+  top:0;
+  z-index:15;
+  border-bottom:1px solid rgba(0,255,255,.14);
+  background:rgba(0,0,0,.84);
+  backdrop-filter:blur(18px);
+}
+.header-inner{min-height:70px;display:flex;align-items:center;justify-content:space-between;gap:24px}
+.brand{display:inline-flex;align-items:center;gap:11px;text-decoration:none;font-family:var(--mono);font-weight:900;letter-spacing:.14em;color:var(--cyan);white-space:nowrap}
+.brand-mark{width:26px;height:26px;display:grid;place-items:center;border:1px solid var(--cyan);clip-path:polygon(50% 0,94% 25%,94% 75%,50% 100%,6% 75%,6% 25%);box-shadow:inset 0 0 14px rgba(0,255,255,.2),0 0 16px rgba(0,255,255,.12);font-size:12px}
+.nav{display:flex;align-items:center;gap:4px;overflow-x:auto;scrollbar-width:none}
+.nav::-webkit-scrollbar{display:none}
+.nav a{padding:8px 10px;color:var(--muted);font-family:var(--mono);font-size:12px;text-decoration:none;white-space:nowrap;border-radius:8px}
+.nav a:hover{color:var(--cyan);background:rgba(0,255,255,.06)}
+.hero{position:relative;padding:112px 0 76px;min-height:760px;display:flex;align-items:center}
+.hero::before{content:"";position:absolute;width:520px;height:520px;right:-100px;top:30px;border:1px solid rgba(0,255,255,.12);border-radius:50%;box-shadow:0 0 120px rgba(0,255,255,.06),inset 0 0 120px rgba(0,255,255,.035);animation:float 8s ease-in-out infinite;z-index:-1}
+.hero-grid{display:grid;grid-template-columns:minmax(0,1.08fr) minmax(360px,.92fr);gap:64px;align-items:center}
+.status{display:inline-flex;align-items:center;gap:10px;padding:7px 12px;border:1px solid rgba(77,255,184,.28);border-radius:999px;background:rgba(77,255,184,.055);color:var(--green);font-family:var(--mono);font-size:12px;letter-spacing:.08em;text-transform:uppercase}
+.status-dot{width:8px;height:8px;border-radius:50%;background:var(--green);animation:pulse-ring 1.9s ease-out infinite}
+.kicker{margin:24px 0 14px;color:var(--cyan);font-family:var(--mono);font-size:13px;letter-spacing:.16em;text-transform:uppercase}
+h1,h2,h3,p{margin-top:0}
+h1{margin-bottom:22px;font-size:clamp(52px,8.7vw,106px);line-height:.88;letter-spacing:-.07em;font-weight:900}
+.hero-name{display:block;color:var(--cyan);text-shadow:0 0 38px rgba(0,255,255,.18)}
+.hero-title{display:block;margin-top:16px;font-size:clamp(28px,4vw,50px);line-height:1.05;letter-spacing:-.04em;color:var(--ink)}
+.hero-title::after{content:"_";color:var(--cyan);font-family:var(--mono);animation:cursor-blink 1s steps(1,end) infinite}
+.lead{max-width:730px;margin-bottom:28px;color:#b8d7d7;font-size:clamp(17px,2vw,21px)}
+.lead strong{color:var(--cyan-3);font-weight:700}
+.actions{display:flex;flex-wrap:wrap;gap:12px;margin:30px 0 26px}
+.button{display:inline-flex;align-items:center;justify-content:center;min-height:46px;padding:10px 17px;border:1px solid var(--line-strong);border-radius:10px;color:var(--cyan);font-family:var(--mono);font-size:13px;font-weight:800;text-decoration:none;letter-spacing:.02em;background:rgba(0,255,255,.04);transition:transform .2s ease,border-color .2s ease,background .2s ease,color .2s ease}
+.button:hover{transform:translateY(-2px);border-color:var(--cyan);background:rgba(0,255,255,.1)}
+.button.primary{background:var(--cyan);color:#001313;border-color:var(--cyan);box-shadow:0 0 28px rgba(0,255,255,.14)}
+.button.primary:hover{background:var(--cyan-3)}
+.badges{display:flex;flex-wrap:wrap;gap:8px}
+.badge{padding:5px 9px;border:1px solid var(--line);border-radius:999px;color:var(--muted);background:rgba(0,255,255,.025);font:11px/1.2 var(--mono);letter-spacing:.07em;text-transform:uppercase}
+.terminal{min-width:0;max-width:100%;position:relative;overflow:hidden;border:1px solid rgba(0,255,255,.25);border-radius:var(--radius);background:linear-gradient(150deg,rgba(4,20,20,.98),rgba(0,4,4,.98));box-shadow:0 28px 90px rgba(0,0,0,.62),inset 0 0 52px rgba(0,255,255,.025);animation:border-glow 6s ease-in-out infinite}
+.terminal::after{content:"";position:absolute;inset:0;height:18%;pointer-events:none;background:linear-gradient(to bottom,transparent,rgba(0,255,255,.075),transparent);animation:scan 7s linear infinite}
+.terminal-bar{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 15px;border-bottom:1px solid rgba(0,255,255,.14);background:rgba(0,255,255,.03);font:11px var(--mono);color:var(--faint)}
+.terminal-dots{display:flex;gap:6px}
+.terminal-dots i{display:block;width:8px;height:8px;border-radius:50%;border:1px solid var(--line-strong)}
+.terminal-body{position:relative;z-index:1;padding:24px;font-family:var(--mono);font-size:13px;line-height:1.82;color:#c8eded}
+.prompt{color:var(--green)}
+.command{color:var(--cyan-3)}
+.output{color:var(--muted)}
+.ok{color:var(--green)}
+.warn{color:var(--warn)}
+.terminal-stats{display:grid;grid-template-columns:repeat(3,1fr);border-top:1px solid rgba(0,255,255,.12)}
+.terminal-stat{padding:15px;border-right:1px solid rgba(0,255,255,.12)}
+.terminal-stat:last-child{border-right:0}
+.terminal-stat strong{display:block;color:var(--cyan);font:700 18px var(--mono)}
+.terminal-stat span{color:var(--faint);font:10px var(--mono);text-transform:uppercase;letter-spacing:.08em}
+.section{padding:88px 0;border-top:1px solid rgba(0,255,255,.09)}
+.section-heading{display:grid;grid-template-columns:220px minmax(0,1fr);gap:34px;margin-bottom:38px;align-items:start}
+.section-index{color:var(--cyan);font:12px var(--mono);letter-spacing:.16em;text-transform:uppercase;padding-top:9px}
+h2{margin-bottom:14px;font-size:clamp(34px,5vw,58px);line-height:1.04;letter-spacing:-.045em}
+.section-copy{max-width:760px;color:var(--muted);font-size:17px}
+.grid{display:grid;gap:16px}
+.hero-grid>*,.section-heading>*,.grid>*,.flow>*,.split>*{min-width:0}
+.grid.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.grid.two{grid-template-columns:repeat(2,minmax(0,1fr))}
+.card{position:relative;padding:24px;border:1px solid var(--line);border-radius:15px;background:linear-gradient(150deg,rgba(6,23,23,.83),rgba(1,7,7,.94));overflow:hidden;transition:transform .2s ease,border-color .2s ease,background .2s ease}
+.card::before{content:"";position:absolute;top:0;left:0;width:52px;height:1px;background:var(--cyan);box-shadow:0 0 15px var(--cyan)}
+.card:hover{transform:translateY(-3px);border-color:var(--line-strong);background:linear-gradient(150deg,rgba(7,30,30,.93),rgba(1,7,7,.98))}
+.card-index{display:block;margin-bottom:16px;color:var(--cyan);font:11px var(--mono);letter-spacing:.13em}
+.card h3{margin-bottom:8px;font-size:18px;letter-spacing:-.015em}
+.card p{margin-bottom:0;color:var(--muted);font-size:14px}
+.card code,.inline-code{color:var(--cyan-3);font-family:var(--mono);font-size:.92em}
+.flow{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px;align-items:stretch;margin-top:24px}
+.flow-step{position:relative;min-height:132px;padding:18px 14px;border:1px solid var(--line);border-radius:13px;background:var(--panel);display:flex;flex-direction:column;justify-content:space-between}
+.flow-step:not(:last-child)::after{content:"›";position:absolute;right:-10px;top:50%;transform:translate(50%,-50%);z-index:2;width:22px;height:22px;display:grid;place-items:center;border:1px solid var(--line-strong);border-radius:50%;background:#001010;color:var(--cyan);font:18px var(--mono)}
+.flow-step b{font:12px var(--mono);color:var(--cyan);text-transform:uppercase;letter-spacing:.06em}
+.flow-step span{color:var(--muted);font-size:12px}
+.callout{margin-top:22px;padding:19px 21px;border-left:3px solid var(--cyan);border-radius:0 12px 12px 0;background:rgba(0,255,255,.045);color:#bddada}
+.callout strong{color:var(--cyan-3)}
+.callout.warning{border-left-color:var(--warn);background:rgba(255,209,102,.045)}
+.callout.warning strong{color:var(--warn)}
+.callout.danger{border-left-color:var(--danger);background:rgba(255,123,156,.045)}
+.callout.danger strong{color:var(--danger)}
+.security-list{counter-reset:secure;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.security-item{counter-increment:secure;display:grid;grid-template-columns:44px minmax(0,1fr);gap:16px;padding:21px;border:1px solid var(--line);border-radius:14px;background:rgba(4,16,16,.72)}
+.security-item::before{content:"0" counter(secure);width:42px;height:42px;display:grid;place-items:center;border:1px solid var(--line-strong);border-radius:10px;color:var(--cyan);font:12px var(--mono);background:rgba(0,255,255,.04)}
+.security-item h3{margin:1px 0 5px;font-size:16px}
+.security-item p{margin:0;color:var(--muted);font-size:13.5px}
+.code-window{min-width:0;max-width:100%;margin:20px 0;border:1px solid var(--line);border-radius:15px;overflow:hidden;background:#010808}
+.code-head{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:11px 15px;border-bottom:1px solid var(--line);background:rgba(0,255,255,.035);color:var(--faint);font:11px var(--mono)}
+.code-label{color:var(--cyan);text-transform:uppercase;letter-spacing:.09em}
+pre{margin:0;padding:21px 22px;max-width:100%;overflow:auto;white-space:pre;tab-size:2;color:#cceeee;font:12.5px/1.72 var(--mono);scrollbar-color:var(--line-strong) transparent}
+pre .c{color:#6f9696}
+pre .k{color:var(--cyan)}
+pre .s{color:var(--green)}
+pre .v{color:#bfa7ff}
+pre .n{color:var(--warn)}
+.steps{counter-reset:step;display:grid;gap:13px}
+.step{counter-increment:step;display:grid;grid-template-columns:52px minmax(0,1fr);gap:18px;padding:21px;border:1px solid var(--line);border-radius:14px;background:rgba(4,16,16,.65)}
+.step::before{content:counter(step);width:48px;height:48px;display:grid;place-items:center;border:1px solid var(--cyan);border-radius:50%;color:var(--cyan);font:700 14px var(--mono);box-shadow:inset 0 0 17px rgba(0,255,255,.08)}
+.step h3{margin:2px 0 6px;font-size:17px}
+.step p{margin:0;color:var(--muted);font-size:14px}
+.browser-demo{border:1px solid var(--line-strong);border-radius:17px;overflow:hidden;background:#000;box-shadow:0 22px 70px rgba(0,0,0,.55)}
+.browser-bar{min-height:44px;display:flex;align-items:center;gap:12px;padding:10px 14px;border-bottom:1px solid var(--line);background:#061414}
+.browser-dots{display:flex;gap:6px}
+.browser-dots i{width:8px;height:8px;border-radius:50%;border:1px solid var(--line-strong)}
+.browser-address{flex:1;min-width:0;padding:6px 10px;border:1px solid var(--line);border-radius:7px;color:var(--faint);font:10px var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#010707}
+.demo-page{position:relative;min-height:360px;padding:54px 30px;display:grid;place-items:center;text-align:center;background:radial-gradient(circle at 50% 35%,rgba(0,255,255,.09),transparent 18rem),#000}
+.demo-page::before{content:"";position:absolute;inset:0;background-image:linear-gradient(rgba(0,255,255,.04) 1px,transparent 1px),linear-gradient(90deg,rgba(0,255,255,.04) 1px,transparent 1px);background-size:30px 30px;mask-image:radial-gradient(circle,black,transparent 75%)}
+.demo-inner{position:relative;max-width:560px}
+.demo-chip{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid rgba(77,255,184,.32);border-radius:999px;color:var(--green);font:10px var(--mono);letter-spacing:.07em}
+.demo-title{margin:20px 0 10px;font-size:clamp(27px,5vw,42px);line-height:1.04;letter-spacing:-.04em;color:var(--cyan)}
+.demo-copy{color:var(--muted);font-size:14px}
+.demo-pills{display:flex;flex-wrap:wrap;justify-content:center;gap:7px;margin-top:20px}
+.demo-pills span{padding:5px 8px;border:1px solid var(--line);border-radius:999px;color:#9ac4c4;font:9px var(--mono);text-transform:uppercase;letter-spacing:.06em}
+.split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:22px;align-items:start}
+.table-wrap{min-width:0;max-width:100%;overflow:auto;border:1px solid var(--line);border-radius:14px}
+table{width:100%;border-collapse:collapse;min-width:780px;background:rgba(2,10,10,.8);font-size:13px}
+th,td{padding:14px 15px;border-bottom:1px solid var(--line);border-right:1px solid var(--line);text-align:left;vertical-align:top}
+th:last-child,td:last-child{border-right:0}
+tr:last-child td{border-bottom:0}
+th{color:var(--cyan);font:700 11px var(--mono);letter-spacing:.07em;text-transform:uppercase;background:rgba(0,255,255,.04)}
+td{color:var(--muted)}
+td:first-child{color:var(--ink);font-weight:650}
+.yes{color:var(--green);font-family:var(--mono)}
+.partial{color:var(--warn);font-family:var(--mono)}
+.no{color:var(--faint);font-family:var(--mono)}
+.api-table table{min-width:850px}
+.api-table td:nth-child(1),.api-table td:nth-child(2){font-family:var(--mono);color:var(--cyan-3)}
+.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:24px 0}
+.fact{padding:18px;border:1px solid var(--line);border-radius:13px;background:var(--panel)}
+.fact strong{display:block;color:var(--cyan);font:700 20px var(--mono)}
+.fact span{color:var(--faint);font:10px var(--mono);text-transform:uppercase;letter-spacing:.07em}
+.faq{display:grid;gap:10px}
+details{border:1px solid var(--line);border-radius:13px;background:rgba(4,16,16,.7)}
+summary{cursor:pointer;list-style:none;padding:18px 50px 18px 20px;color:var(--ink);font-weight:700;position:relative}
+summary::-webkit-details-marker{display:none}
+summary::after{content:"+";position:absolute;right:19px;top:50%;transform:translateY(-50%);color:var(--cyan);font:22px var(--mono)}
+details[open] summary::after{content:"−"}
+details p{padding:0 20px 19px;margin:0;color:var(--muted);font-size:14px;max-width:920px}
+.footer{padding:42px 0 56px;border-top:1px solid rgba(0,255,255,.12)}
+.footer-grid{display:flex;align-items:flex-start;justify-content:space-between;gap:30px;flex-wrap:wrap}
+.footer-brand{color:var(--cyan);font:800 14px var(--mono);letter-spacing:.1em}
+.footer-copy{max-width:650px;margin:9px 0 0;color:var(--faint);font-size:12px}
+.footer-links{display:flex;flex-wrap:wrap;gap:9px}
+.footer-links a{padding:7px 10px;border:1px solid var(--line);border-radius:8px;color:var(--muted);font:11px var(--mono);text-decoration:none}
+.footer-links a:hover{color:var(--cyan);border-color:var(--line-strong)}
+.small{color:var(--faint);font-size:12px}
+.no-margin{margin:0}
+@media (max-width:980px){
+  .hero{padding-top:90px;min-height:auto}
+  .hero-grid{grid-template-columns:1fr;gap:42px}
+  .hero::before{right:-260px}
+  .grid.three{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .flow{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .flow-step:nth-child(3)::after{display:none}
+  .facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media (max-width:760px){
+  .shell{width:min(var(--max),calc(100% - 26px))}
+  .header-inner{min-height:62px;gap:14px}
+  .brand{font-size:13px}
+  .brand-mark{width:23px;height:23px}
+  .nav a{font-size:10px;padding-inline:7px}
+  .nav a:nth-child(n+5){display:none}
+  .hero{padding:74px 0 58px}
+  .hero-grid{gap:30px}
+  h1{font-size:clamp(48px,18vw,76px)}
+  .section{padding:68px 0}
+  .section-heading{grid-template-columns:1fr;gap:8px;margin-bottom:28px}
+  .section-index{padding-top:0}
+  .grid.three,.grid.two,.security-list,.split{grid-template-columns:1fr}
+  .flow{grid-template-columns:1fr}
+  .flow-step{min-height:105px}
+  .flow-step:not(:last-child)::after{content:"⌄";right:50%;top:auto;bottom:-10px;transform:translate(50%,50%)}
+  .terminal-stats{grid-template-columns:1fr}
+  .terminal-stat{border-right:0;border-bottom:1px solid rgba(0,255,255,.12)}
+  .terminal-stat:last-child{border-bottom:0}
+  .facts{grid-template-columns:1fr 1fr}
+  pre{font-size:11px;padding:18px}
+  .step,.security-item{grid-template-columns:42px minmax(0,1fr);gap:13px;padding:17px}
+  .step::before{width:40px;height:40px}
+}
+@media (max-width:440px){
+  .nav a:nth-child(n+3){display:none}
+  .actions{display:grid}
+  .button{width:100%}
+  .facts{grid-template-columns:1fr}
+  .browser-address{font-size:8px}
+  .demo-page{padding-inline:17px}
+}
+@media (prefers-reduced-motion:reduce){
+  html{scroll-behavior:auto}
+  *,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important}
+}
+@media print{
+  body{background:#fff;color:#111}
+  body::before,body::after,.site-header,.actions{display:none}
+  .shell{width:100%}
+  .section{break-inside:avoid;border-color:#bbb}
+  .card,.code-window,.callout,.step,.security-item,.table-wrap,details{background:#fff;color:#111;border-color:#bbb;box-shadow:none}
+  .section-copy,.card p,.step p,.security-item p,td,details p{color:#333}
+  pre{color:#111;white-space:pre-wrap}
+}</style>
+<!-- SecurityOps: canonical identity and language discovery; no tracking. -->
+<link href="https://esquema.securityops.co/" rel="canonical"/>
+<link href="https://esquema.securityops.co/" hreflang="en" rel="alternate"/>
+<link href="https://esquema.securityops.co/pt-br.html" hreflang="pt-BR" rel="alternate"/>
+<link href="https://esquema.securityops.co/" hreflang="x-default" rel="alternate"/>
+<meta content="https://esquema.securityops.co/" property="og:url"/>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="site-header">
+<div class="shell header-inner">
+<a aria-label="Esquema home" class="brand" href="#top">
+<span aria-hidden="true" class="brand-mark">E</span>
+<span>ESQUEMA</span>
+</a>
+<nav aria-label="Primary navigation" class="nav"><a aria-label="View this page in Brazilian Portuguese" data-language-switch="true" href="pt-br.html" hreflang="pt-BR" lang="pt-BR">PT-BR</a>
+<a href="#overview">Overview</a>
+<a href="#security">Security</a>
+<a href="#start">Quick start</a>
+<a href="#website">Website demo</a>
+<a href="#reference">Reference</a>
+<a href="#tests">Tests</a>
+</nav>
+</div>
+</header>
+<main id="main">
+<section class="hero" id="top">
+<div class="shell hero-grid">
+<div>
+<span class="status"><span aria-hidden="true" class="status-dot"></span> release 0.3.0 · Linux</span>
+<p class="kicker">Guile-native container runtime</p>
+<h1>
+<span class="hero-name">Esquema</span>
+<span class="hero-title">Rootless isolation as Scheme values</span>
+</h1>
+<p class="lead">Describe programs and their policies as Scheme values. Run Linux containers <strong>without root or a daemon</strong>, with namespaces, filesystem isolation and seccomp. Version 0.3.0 adds conventional installation and complete English and Brazilian Portuguese guides.</p>
+<div class="actions">
+<a class="button primary" href="#start">Run the smoke test →</a>
+<a class="button" href="https://git.securityops.co/cristiancmoises/esquema" rel="noopener noreferrer">Canonical source ↗</a>
+<a class="button" href="https://git.securityops.co/cristiancmoises/esquema/src/branch/main/docs/guide.md">Read the guide ↗</a></div>
+<div aria-label="Project attributes" class="badges">
+<span class="badge">Rootless by default</span>
+<span class="badge">Daemon-free</span>
+<span class="badge">Guile Scheme</span>
+<span class="badge">GNU Guix</span>
+<span class="badge">AGPL-3.0-or-later</span>
+<span class="badge">Zero JavaScript here</span>
+</div>
+</div>
+<div aria-label="Esquema terminal example" class="terminal">
+<div class="terminal-bar">
+<span aria-hidden="true" class="terminal-dots"><i></i><i></i><i></i></span>
+<span>esquema://sandbox/boot</span>
+<span>TTY 01</span>
+</div>
+<div class="terminal-body"><div class="code-window"><div class="code-head"><span class="code-label">Scheme</span></div><pre><code>(use-modules (esquema runtime))
+(esquema-runtime-version)
+;; =&gt; "0.3.0"
+
+;; make-container -&gt; run-container
+;; Linux namespaces + seccomp
+;; strict? requires delegated cgroups</code></pre></div></div>
+<div class="terminal-stats">
+<div class="terminal-stat"><strong>0.3.0</strong><span>runtime version</span></div>
+<div class="terminal-stat"><strong>7</strong><span>default namespaces</span></div>
+<div class="terminal-stat"><strong>PID 1</strong><span>strict-mode supervisor</span></div>
+</div>
+</div>
+</div>
+</section>
+<section class="section" id="overview">
+<div class="shell">
+<div class="section-heading">
+<span class="section-index">01 / Overview</span>
+<div>
+<h2>Containerization that stays in the Guix language.</h2>
+<p class="section-copy">Esquema keeps the workload, isolation policy and resource limits in Scheme. A container is a first-class value rather than a YAML document sent to a privileged service.</p>
+</div>
+</div>
+<div class="grid three">
+<article class="card"><span class="card-index">01 — DECLARATIVE</span><h3>Scheme from definition to runtime</h3><p>Use <code>make-container</code>, keyword arguments and ordinary Guile composition. Generate containers, share functions and keep policy beside system configuration.</p></article>
+<article class="card"><span class="card-index">02 — ROOTLESS</span><h3>No host root required</h3><p>The payload can appear as UID 0 inside its user namespace while mapping back to the invoking ordinary user outside.</p></article>
+<article class="card"><span class="card-index">03 — DAEMON-FREE</span><h3>No always-on privileged control plane</h3><p>The calling process creates the sandbox, executes the payload, waits for it and returns the exit status.</p></article>
+<article class="card"><span class="card-index">04 — REPRODUCIBLE</span><h3>Designed around GNU Guix</h3><p>Use the manifest and Guix store paths. To reproduce dependencies, pin the channel revisions too: the manifest alone does not pin them.</p></article>
+<article class="card"><span class="card-index">05 — EXPLICIT</span><h3>Isolation is visible in code</h3><p>Namespaces, mounts, environment, hostname, seccomp, capability handling, rootfs mode and limits are represented directly.</p></article>
+<article class="card"><span class="card-index">06 — SMALL</span><h3>Thin Guile layer, hardened C primitives</h3><p>Guile provides the declarative interface while low-level namespace and security setup is performed by a focused C library.</p></article>
+</div>
+<div aria-label="Container startup architecture" class="flow">
+<div class="flow-step"><b>Scheme value</b><span>name · rootfs · argv · policy</span></div>
+<div class="flow-step"><b>Guile runtime</b><span>validates and marshals configuration</span></div>
+<div class="flow-step"><b>clone / fork</b><span>creates the isolated child</span></div>
+<div class="flow-step"><b>Namespaces</b><span>user · mount · PID · UTS · IPC · net · cgroup</span></div>
+<div class="flow-step"><b>Hardening</b><span>pivot_root · caps · no_new_privs · seccomp</span></div>
+<div class="flow-step"><b>execve</b><span>payload with optional supervisor</span></div>
+</div>
+<div class="callout"><strong>Fork-safety:</strong> the project applies the critical setup in a deliberate order and keeps the child path between <code class="inline-code">fork</code> and <code class="inline-code">execve</code> within async-signal-safe C operations.</div>
+</div>
+</section>
+<section class="section" id="security"><div class="shell"><div class="section-heading"><span class="section-index">02 / Esquema 0.3.0</span><div><h2>Explicit policies. Verifiable requirements.</h2><p class="section-copy">Compatibility mode attempts cgroup and Landlock setup. Strict mode requires the configured protections. Containers share the host Linux kernel.</p></div></div><div class="grid three"><article class="card"><span class="card-index">01</span><h3>Namespaces and identity</h3><p>Seven namespaces by default. Internal uid 0 maps to the host user; capabilities are removed and no_new_privs is set.</p></article><article class="card"><span class="card-index">02</span><h3>Version-1 seccomp policy</h3><p>Validates architecture, socket families, io_uring and ioctl. Dangerous syscall denials are fatal; non-native ABIs are rejected.</p></article><article class="card"><span class="card-index">03</span><h3>Landlock and descriptors</h3><p>Confines handled access to the new root. Descriptors above 2 close unless explicitly delegated. Landlock cannot revoke already-open descriptors.</p></article><article class="card"><span class="card-index">04</span><h3>Verified resource limits</h3><p>Strict mode requires delegated cgroups v2, at least one cgroup limit and version-1 RLIMIT_NOFILE. Setup failures abort the launch.</p></article><article class="card"><span class="card-index">05</span><h3>Mounts and rootfs</h3><p>Bind destinations reject traversal. Strict mode requires the necessary mount APIs; a strict read-only root requires recursive application and readback.</p></article><article class="card"><span class="card-index">06</span><h3>PID-1 supervision</h3><p>Forwards signals, reaps descendants and escalates TERM to KILL after the timeout. Automatically enabled in strict mode.</p></article></div><div class="code-window"><div class="code-head"><span class="code-label">Scheme · strict / Fortress</span></div><pre><code>(use-modules (esquema runtime) (esquema container))
+
+(exit
+ (run-container
+  (make-container "worker" "/absolute/path/to/rootfs"
+                  '("/bin/sh" "-c" "echo confined")
+                  #:strict? #t
+                  #:rootfs-ro? #t
+                  #:limits (make-limits-v1 (* 256 1024 1024)
+                                          128 50000 100000 1024))))</code></pre></div><div class="callout">Example: 256 MiB, 128 processes, 50% of one CPU and 1024 open files. The rootfs must contain /bin/sh and its dependencies. This configuration requires Landlock, delegated cgroups and suitable mount APIs. <a href="https://git.securityops.co/cristiancmoises/esquema/src/branch/main/docs/guide.md">Read the policy boundaries.</a></div></div></section>
+<section class="section" id="start"><div class="shell"><div class="section-heading"><span class="section-index">03 / Esquema 0.3.0</span><div><h2>From source to your first container.</h2><p class="section-copy">Linux, Guile 3.0, a GNU-compatible C compiler, GNU Make, pkg-config, libseccomp and Linux headers with Landlock. The demo requires static Bash.</p></div></div><div class="code-window"><div class="code-head"><span class="code-label">Guix · checkout</span></div><pre><code>git clone https://git.securityops.co/cristiancmoises/esquema
+cd esquema
+guix shell -m manifest.scm -- make smoke
+export ESQUEMA_TEST_SHELL="$(guix build bash-static:out)/bin/bash"
+guix shell -m manifest.scm -- sh examples/build-rootfs.sh examples/rootfs-min
+guix shell -m manifest.scm -- env ESQUEMA_LIBDIR="$PWD" \
+  guile -L scheme examples/hello.scm</code></pre></div><div class="callout">The manifest uses your current channels; pin their revisions to reproduce the build. Without Guix, install your distribution’s development dependencies and run make directly.</div><div class="code-window"><div class="code-head"><span class="code-label">Local installation · dependencies already installed</span></div><pre><code>make smoke
+make install PREFIX="$HOME/.local"
+export GUILE_LOAD_PATH="$HOME/.local/share/guile/site/3.0${GUILE_LOAD_PATH:+:$GUILE_LOAD_PATH}"
+guile -c '(use-modules (esquema runtime)) (display (esquema-runtime-version)) (newline)'</code></pre></div><div class="code-window"><div class="code-head"><span class="code-label">Package staging</span></div><pre><code>make install PREFIX=/usr DESTDIR="$PWD/package-root"</code></pre></div><p class="small">Use make uninstall with the same directory settings to remove the installation. The third-party securityops channel also provides guix install esquema. This does not imply acceptance into upstream distributions.</p></div></section>
+<section class="section" id="website"><div class="shell"><div class="section-heading"><span class="section-index">04 / Esquema 0.3.0</span><div><h2>Run the web demonstration.</h2><p class="section-copy">The repository example runs BusyBox httpd in a container on port 8081. This public site is distributed as static HTML; its hosting is not evidence of runtime isolation.</p></div></div><div class="code-window"><div class="code-head"><span class="code-label">Guix · BusyBox</span></div><pre><code>guix shell -m manifest.scm -- make smoke
+BUSYBOX="$(guix build busybox)/bin/busybox" \
+  sh examples/build-web-rootfs.sh examples/rootfs-web
+ESQ_PORT=8081 guix shell -m manifest.scm -- \
+  env ESQUEMA_LIBDIR="$PWD" guile -L scheme examples/deploy-web.scm</code></pre></div><div class="code-window"><div class="code-head"><span class="code-label">In another terminal</span></div><pre><code>curl --fail http://127.0.0.1:8081/</code></pre></div><div class="callout">Place content in examples/rootfs-web/www/. ESQ_ROOTFS overrides the script-relative rootfs; ESQ_PORT chooses the port. This example shares the host network, uses compatibility mode and applies cgroups on a best-effort basis. The read-only /gnu/store bind exposes its readable contents.</div><p class="small">For public HTTPS, configure a reverse proxy and access rules. The example serves HTTP and may listen on all host interfaces.</p></div></section>
+<section class="section" id="reference">
+<div class="shell">
+<div class="section-heading">
+<span class="section-index">05 / API reference</span>
+<div>
+<h2>The container record, field by field.</h2>
+<p class="section-copy">The public constructor accepts three required values followed by keyword options. Defaults below reflect the current <code>scheme/esquema/container.scm</code> implementation.</p>
+</div>
+</div>
+<div class="table-wrap api-table">
+<table>
+<thead><tr><th>Argument</th><th>Default</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td>name</td><td>required</td><td>Logical name; also becomes the default hostname.</td></tr>
+<tr><td>rootfs</td><td>required</td><td>Path to the filesystem tree entered through <code class="inline-code">pivot_root</code>.</td></tr>
+<tr><td>command</td><td>required</td><td>Non-empty list of strings used as the payload argv.</td></tr>
+<tr><td>#:env</td><td>'()</td><td>Environment alist in the form <code class="inline-code">(("KEY" . "VALUE") ...)</code>.</td></tr>
+<tr><td>#:mounts</td><td>'()</td><td>Bind mounts in the form <code class="inline-code">(source destination read-only?)</code>.</td></tr>
+<tr><td>#:namespaces</td><td>(user mount pid uts ipc net cgroup)</td><td>Namespace symbols. Removing one deliberately shares that host namespace.</td></tr>
+<tr><td>#:hostname</td><td>name</td><td>Hostname visible inside the UTS namespace.</td></tr>
+<tr><td>#:id-map</td><td>#f</td><td><code class="inline-code">#f</code> maps to the current UID/GID; otherwise provide a UID/GID pair.</td></tr>
+<tr><td>#:seccomp?</td><td>#t</td><td>Loads the seccomp-BPF policy.</td></tr>
+<tr><td>#:drop-caps?</td><td>#t</td><td>Clears capabilities and applies related privilege locks.</td></tr>
+<tr><td>#:rootfs-ro?</td><td>#f</td><td>Remounts the root filesystem read-only when explicitly enabled.</td></tr>
+<tr><td>#:cgroup-name</td><td>#f</td><td>Optional cgroup name used for resource-control placement.</td></tr>
+<tr><td>#:limits</td><td>#f</td><td>make-limits for compatibility; make-limits-v1 adds the open-file limit required by strict mode.</td></tr>
+<tr><td>#:strict?</td><td>#f</td><td>Requires a complete Fortress configuration.</td></tr><tr><td>#:seccomp-policy</td><td>#f</td><td>Typed policy; supplied automatically in strict mode.</td></tr><tr><td>#:landlock?</td><td>#t</td><td>Attempts restriction; mandatory in strict mode.</td></tr><tr><td>#:preserve-fds</td><td>'()</td><td>Explicitly delegated descriptors numbered 3 or higher.</td></tr><tr><td>#:supervise?</td><td>#f</td><td>PID-1 supervisor; enabled in strict mode.</td></tr><tr><td>#:teardown-timeout-ms</td><td>2000</td><td>TERM-to-KILL timeout, 1–60000 ms.</td></tr></tbody>
+</table>
+</div>
+<div class="facts">
+<div class="fact"><strong>7</strong><span>default namespaces</span></div>
+<div class="fact"><strong>#t</strong><span>seccomp default</span></div>
+<div class="fact"><strong>#t</strong><span>drop-caps default</span></div>
+<div class="fact"><strong>#f</strong><span>read-only root default</span></div>
+</div>
+</div>
+</section>
+<section class="section" id="tests"><div class="shell"><div class="section-heading"><span class="section-index">06 / Esquema 0.3.0</span><div><h2>Validate on the target host.</h2><p class="section-copy">Results depend on kernel, architecture and permissions. The smoke test verifies library loading; integration tests launch containers.</p></div></div><div class="code-window"><div class="code-head"><span class="code-label">Guix · validation</span></div><pre><code>export ESQUEMA_TEST_SHELL="$(guix build bash-static:out)/bin/bash"
+guix shell -m manifest.scm -- make check
+guix shell -m manifest.scm -- make static
+guix shell -m manifest.scm -- make sanitize
+guix shell -m manifest.scm -- make test-perf</code></pre></div><div class="grid three"><article class="card"><span class="card-index">01</span><h3>make check</h3><p>C, functional and security tests, cppcheck, and installation regression with staging, custom prefixes and compiled modules.</p></article><article class="card"><span class="card-index">02</span><h3>make sanitize</h3><p>ASan and UBSan for C tests. make static runs GCC’s analyzer.</p></article><article class="card"><span class="card-index">03</span><h3>make test-perf</h3><p>Measures startup and leaks on your host. A latency measurement is not a guarantee for other machines.</p></article></div><div class="callout">The version-1 resource policy implements x86-64 and AArch64; execution validation for this release was performed on x86-64. Kernel-dependent tests may fail or skip without prerequisites. Record the actual results.</div></div></section>
+<section class="section" id="comparison"><div class="shell"><div class="section-heading"><span class="section-index">07 / Esquema 0.3.0</span><div><h2>Where Esquema fits.</h2><p class="section-copy">A library for container policies in Scheme, with Guix integration and direct Linux installation.</p></div></div><div class="grid three"><article class="card"><span class="card-index">01</span><h3>Linux</h3><p>Namespaces, seccomp and Landlock are Linux APIs. BSD, macOS and Windows require a Linux VM; native support is not implemented.</p></article><article class="card"><span class="card-index">02</span><h3>Scheme + C</h3><p>Compose configurations in Guile. The C library handles low-level setup and exposes a public API.</p></article><article class="card"><span class="card-index">03</span><h3>Rootfs</h3><p>Prepare the executable and dependencies in a directory. The runtime does not pull OCI images or provide a Docker-compatible CLI.</p></article></div></div></section>
+<section class="section" id="production">
+<div class="shell">
+<div class="section-heading">
+<span class="section-index">08 / Production guidance</span>
+<div>
+<h2>Keep the page static and the serving path narrow.</h2>
+<p class="section-copy">This file performs no third-party requests, ships no JavaScript, sets a hash-pinned inline-style CSP and uses no cookies, analytics, web fonts or remote images.</p>
+</div>
+</div>
+<div class="grid two">
+<article class="card"><span class="card-index">ROOTFS</span><h3>Minimize and seal</h3><p>Prefer a static server binary and a read-only rootfs. Add only the files, mounts and devices the workload needs.</p></article>
+<article class="card"><span class="card-index">NETWORK</span><h3>Bind locally</h3><p>Listen on an unprivileged loopback port and expose it through an HTTPS reverse proxy with rate limits and strict response headers.</p></article>
+<article class="card"><span class="card-index">POLICY</span><h3>Preserve defaults</h3><p>Do not disable seccomp or capability removal to make an incompatible workload run. Refine the workload or add the smallest reviewed exception.</p></article>
+<article class="card"><span class="card-index">OPERATIONS</span><h3>Patch and observe</h3><p>Keep the shared host kernel current, monitor process exits and resource pressure, and rerun the security suite after runtime changes.</p></article>
+</div>
+<h3>Recommended HTTP response headers</h3>
+<div class="code-window">
+<div class="code-head"><span class="code-label">HTTP</span><span>configure at the HTTPS reverse proxy</span></div>
+<pre><code>Content-Security-Policy: default-src 'none'; script-src 'none'; style-src 'sha256-XdHseDi4JeEfPmuOtskcvuhWz6zaRdy8Mkv7oBWMIk8='; img-src data:; font-src 'none'; connect-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; manifest-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+Referrer-Policy: no-referrer
+X-Content-Type-Options: nosniff
+X-Frame-Options: DENY
+Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=()
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Resource-Policy: same-origin</code></pre>
+</div>
+<div class="callout"><strong>Why both meta and headers?</strong> This document includes a CSP meta policy so it remains restrictive when served directly by a minimal static server. Server response headers are still preferred and are required for protections such as <code class="inline-code">frame-ancestors</code>; enable HSTS only after the entire intended HTTPS scope is ready.</div>
+</div>
+</section>
+<section class="section" id="faq">
+<div class="shell">
+<div class="section-heading">
+<span class="section-index">09 / FAQ</span>
+<div><h2>Operational answers.</h2><p class="section-copy">The most important distinctions before deploying a workload.</p></div>
+</div>
+<div class="faq">
+<details><summary>Is UID 0 inside the container host root?</summary><p>No. With the default user namespace, UID 0 inside maps to the invoking ordinary UID outside. The capability set is also emptied and securebits/no-new-privileges controls prevent UID 0 from regaining normal root semantics.</p></details>
+<details><summary>Why is the web server unreachable with the default namespace list?</summary><p>The default includes a private network namespace, so the workload sees loopback rather than the host interfaces. A host-reachable deployment deliberately omits <code class="inline-code">net</code>, or must add an explicit networking mechanism.</p></details>
+<details><summary>Can Esquema replace a VM for hostile code?</summary><p>No blanket equivalence should be assumed. Esquema adds strong container controls but shares the Linux kernel. Use a VM or microVM when the threat model requires a separate kernel boundary.</p></details>
+<details><summary>Why mount /gnu/store for the BusyBox demo?</summary><p>The Guix BusyBox binary is dynamically linked and needs its loader and libraries. Mounting the store read-only resolves them. A statically linked web server removes that dependency and narrows visibility.</p></details>
+<details><summary>Does cgroups v2 always enforce the requested limit?</summary><p>Compatibility mode provides no mandatory guarantee. Strict mode verifies requested limits and aborts startup if delegation or enforcement fails.</p></details>
+<details><summary>Does this page contain JavaScript or external assets?</summary><p>No. It is one HTML file with embedded CSS, a data-URI favicon and no external requests. All animation is CSS and is disabled when the user requests reduced motion.</p></details>
+</div>
+</div>
+</section>
+</main>
+<footer class="footer">
+<div class="shell footer-grid">
+<div>
+<div class="footer-brand">SECURITY OPS® / ESQUEMA</div>
+<p class="footer-copy">Esquema 0.3.0 · Guile-native Linux containers. First-party source under AGPL-3.0-or-later or a separate signed commercial agreement. Dependencies retain their own licenses. <a href="https://git.securityops.co/cristiancmoises/esquema/src/branch/main/LICENSING.md">Licensing</a>.</p>
+</div>
+<div aria-label="Project links" class="footer-links"><a data-language-switch="true" href="pt-br.html" hreflang="pt-BR" lang="pt-BR">Português ↗</a>
+<a href="https://git.securityops.co/cristiancmoises/esquema" rel="noopener noreferrer">Forgejo ↗</a>
+<a href="https://github.com/cristiancmoises/esquema" rel="noopener noreferrer">GitHub ↗</a>
+<a href="https://codeberg.org/berkeley/esquema" rel="noopener noreferrer">Codeberg ↗</a>
+<a href="https://securityops.co" rel="noopener noreferrer">Security Ops ↗</a>
+<a href="mailto:sac@securityops.co">Contact ↗</a>
+</div>
+</div>
+</footer>
+</body>
+</html>

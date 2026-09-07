@@ -1,306 +1,176 @@
 # Esquema — a Guile-native container runtime
 
-**Esquema** is a minimal, security-first, **rootless** container runtime built
-natively in Scheme. It integrates with **GNU Guix** and **Shepherd** to give
-reproducible, strongly-isolated environments without a daemon, without root,
-and without YAML — just declarative Scheme.
+[English guide](docs/guide.md) · [Português brasileiro](#português-brasileiro) ·
+[Guia completo em pt-BR](docs/guide.pt-BR.md)
 
-Containers are **first-class Scheme objects**. Isolation is **explicit,
-fine-grained and secure by default**.
+Esquema runs programs in rootless Linux containers described as Scheme values.
+Its Guile API calls a C library that sets up namespaces, filesystem isolation,
+capability dropping and seccomp before executing the payload. No daemon is
+required. Guix and Shepherd integration is included; the runtime can also be
+built and installed directly on Linux.
 
-## License
+## Requirements
 
-Esquema first-party source is available under either
-`AGPL-3.0-or-later` or a separate signed commercial agreement. The commercial
-notice does not itself grant proprietary-use rights and does not relicense GNU
-Guix, Guile, Linux, libseccomp, libc, or other dependencies. See
-[`LICENSING.md`](LICENSING.md), [`LICENSING.pt-BR.md`](LICENSING.pt-BR.md),
-`NOTICE`, and `LICENSE-COMMERCIAL`.
+- Linux with unprivileged user namespaces and seccomp enabled. The version-1
+  resource policy implements x86-64 and AArch64; kernel features and local
+  permissions also determine which configurations can run.
+- Guile 3.0, a GNU-compatible C toolchain, GNU Make, `pkg-config`, libseccomp
+  development files, and Linux UAPI headers including Landlock.
+- A root filesystem containing the payload, its loader and its libraries.
+  The demo and integration tests use **statically linked Bash**.
+- Strict mode additionally needs working Landlock, delegated cgroups v2
+  controllers and the required modern mount APIs. See the
+  [operating guide](docs/guide.md#isolation-and-strict-mode).
 
----
+Esquema uses Linux-specific APIs. BSD, macOS and Windows need a Linux VM to run
+it; native support for those kernels is not implemented.
 
-## Security model
+## Build and run
 
-Esquema confines an untrusted payload behind defence-in-depth. Every layer is
-applied, in the correct order, inside a `clone`/`fork` child that runs only
-async-signal-safe C between `fork` and `execve`:
-
-1. **User namespace (rootless).** Runs as an unprivileged user; the payload is
-   root *inside* the namespace, mapped to your ordinary uid outside.
-2. **Mount / PID / UTS / IPC / net / cgroup namespaces.** Full process,
-   filesystem, hostname, IPC and network isolation.
-3. **`pivot_root` into the rootfs**, with the host mount tree detached so it is
-   unreachable, a fresh `/proc`, and minimal `/dev`.
-4. **All capabilities dropped** — bounding set emptied, ambient cleared,
-   `capset` zeroed, `securebits` locked (`SECBIT_NOROOT`, so uid-0-in-ns confers
-   nothing), and `PR_SET_NO_NEW_PRIVS` set so setuid binaries cannot escalate.
-5. **Versioned seccomp-BPF policy** — default `ENOSYS`, with a mandatory
-   `KILL_PROCESS` deny-set for `ptrace`, `mount`, `unshare`, `setns`, `bpf`,
-   `keyctl`, module and kexec syscalls, etc. Version 1 validates the runtime
-   architecture, selects allowed socket families, makes `io_uring` an explicit
-   allow-or-kill decision, and offers `none`, `restricted`, or legacy ioctl
-   handling. `TIOCSTI` and `TIOCLINUX` remain fatal invariants. Non-native
-   (including x32) ABIs are killed.
-6. **Landlock filesystem scope** — when the running kernel supports Landlock,
-   future path opens covered by the build-time Landlock headers are confined
-   beneath the post-`pivot_root` filesystem.
-   This base rule prevents new access outside the cell root; it is not yet a
-   per-directory least-privilege policy and it cannot revoke an already-open
-   descriptor.
-7. **Descriptor capability closure** — every inherited descriptor above 2 is
-   closed before `execve`, unless the trusted caller explicitly registered it
-   with `#:preserve-fds` / `esquema_config_preserve_fd`. This is the mechanism
-   intended for a pre-opened, capability-scoped agent channel.
-8. **cgroups v2 limits** — legacy mode remains best-effort under rootless
-   delegation. Opt-in `#:strict? #t` mode installs and reads back every
-   requested `memory.max`, `pids.max`, and `cpu.max` value before releasing the
-   payload, and aborts cleanly if delegation or verification fails.
-9. **Bounded open-file table** — the version-1 resource policy sets and reads
-   back both halves of `RLIMIT_NOFILE` before seccomp and payload execution.
-   Values are limited to 16..1048576, and a preserved descriptor at or above
-   the bound is rejected. Strict seccomp then kills `setrlimit` and mutating
-   `prlimit64` calls while retaining query-only `prlimit64`; the installed hard
-   limit independently prevents a raise. On the supported x86-64 and AArch64
-   ABIs, the post-fork path uses an allocation-free inline Linux `prlimit64`
-   system call rather than a libc wrapper. It fails closed if that operation,
-   its architecture implementation, or its readback is unavailable.
-10. **Race-resistant bind attachment** — destinations must be relative and may
-   not contain empty, `.` or `..` components. They are resolved beneath a
-   pinned root with `openat2` (`RESOLVE_BENEATH`, `NO_SYMLINKS`,
-   `NO_MAGICLINKS`) or a component-by-component fd walk. On modern kernels,
-   detached mounts are made read-only before fd-to-fd `move_mount` attachment.
-   Strict mode fails closed when this fd-based mount API is unavailable;
-   compatibility mode retains a validated pathname fallback for older kernels.
-   A strict read-only root also requires a successful recursive
-   `mount_setattr(AT_RECURSIVE)` operation and readback. It never treats the
-   legacy single-mount remount as equivalent, because that fallback can leave
-   nested mounts writable. Compatibility mode may use that documented,
-   weaker fallback when the recursive API is unavailable.
-11. **PID-1 supervision** — Fortress uses a minimal supervisor which forwards
-    lifecycle signals to the payload process group, adopts and reaps orphaned
-    descendants, and escalates from `TERM` to `KILL` after a bounded timeout.
-    The launcher does not return a cell pid until its host-side signal relay is
-    installed, so an immediate stop request is not lost during setup.
-    Process-wide cleanup records are dynamically allocated, cross-thread safe,
-    and capped at 4096 live cgroup-backed launches instead of a fixed 64-slot
-    thread-local table.
-
-This is verified by the test-suite (see *Testing*): the payload cannot see host
-PIDs, cannot reach the host filesystem, has an empty capability set, is killed
-on a denied syscall, and sees only loopback networking. Esquema cells still
-share the host Linux kernel; these controls are not a hypervisor or VM boundary.
-
-### How this compares
-
-| Property                    | Esquema            | Docker/Podman   | Jails / LXC     | `guix shell`        |
-|-----------------------------|--------------------|-----------------|-----------------|---------------------|
-| Language-native (Scheme)    | ✅                 | ❌              | ❌              | ✅                  |
-| Daemon-free                 | ✅                 | ❌ (Docker)     | ✅              | ✅                  |
-| Rootless by default         | ✅                 | partial         | ❌              | ✅                  |
-| User namespace isolation    | ✅                 | ✅              | n/a (BSD)       | only `--container`  |
-| seccomp syscall filtering   | ✅ (allowlist)     | ✅              | ✅ (coarse)     | ❌                  |
-| Capability drop + no-new-privs | ✅              | ✅              | partial         | ❌                  |
-| Declarative in one language | ✅ (Scheme)        | ❌ (YAML/OCI)   | ❌              | ✅ (Guix)           |
-
-A plain `guix shell` gives a reproducible *environment* but **no kernel-level
-isolation** (shared namespaces, no seccomp, full capabilities). Esquema adds the
-isolation while keeping the Scheme-native, daemon-free ergonomics. Container
-startup is ~**13 ms** (≈8 ms over a bare `execve`).
-
----
-
-## Getting started
-
-Build the shared library and run the smoke test inside the pinned environment:
+Run these commands from the repository root:
 
 ```sh
 guix shell -m manifest.scm -- make smoke
-```
-
-Build a self-contained demo rootfs and launch a container:
-
-```sh
+export ESQUEMA_TEST_SHELL="$(guix build bash-static:out)/bin/bash"
 guix shell -m manifest.scm -- sh examples/build-rootfs.sh examples/rootfs-min
-guix shell -m manifest.scm -- env ESQUEMA_LIBDIR=$PWD \
+guix shell -m manifest.scm -- env ESQUEMA_LIBDIR="$PWD" \
   guile -L scheme examples/hello.scm
 ```
 
-Define and run a container from Scheme:
+The manifest selects dependencies from your current Guix channels; it does not
+pin a channel revision. Record and pin the channels as well when reproducing a
+build. `make smoke` checks library loading, while `hello.scm` launches an actual
+container.
+
+On a Linux system with the development dependencies already installed:
+
+```sh
+make smoke
+make install PREFIX="$HOME/.local"
+export GUILE_LOAD_PATH="$HOME/.local/share/guile/site/3.0${GUILE_LOAD_PATH:+:$GUILE_LOAD_PATH}"
+guile -c '(use-modules (esquema runtime)) (display (esquema-runtime-version)) (newline)'
+```
+
+For package staging, custom directories and removal, see
+[installation](docs/guide.md#installation).
+
+## Describe a container
 
 ```scheme
 (use-modules (esquema runtime) (esquema container))
 
-(define box
-  (make-container "web" "/path/to/rootfs"
-                  (list "/bin/httpd" "-p" "8080")
-                  #:hostname   "web"
-                  #:rootfs-ro? #t                       ; seal the root
-                  #:limits     (make-limits (* 256 1024 1024) ; memory.max bytes
-                                            128              ; pids.max
-                                            50000 100000))) ; cpu 50%
-;; forks, isolates, execve()s the payload, waits, returns the exit status:
-(run-container box)
+(define demo
+  (make-container "demo" "/absolute/path/to/rootfs"
+                  '("/bin/sh" "-c" "echo Hello from Esquema")
+                  #:rootfs-ro? #t))
+
+(exit (run-container demo))
 ```
 
-`make-container` is **secure by default**: all namespaces, seccomp on, and every
-capability dropped unless you opt out (`#:seccomp? #f`, `#:drop-caps? #f`,
-`#:namespaces '(user mount pid ...)`).
+`run-container` waits and returns the exit status. The rootfs must already
+contain `/bin/sh` and its dependencies. The default constructor enables all
+seven namespaces, seccomp, capability dropping and an attempt to apply
+Landlock. It leaves the rootfs writable unless `#:rootfs-ro? #t` is supplied.
+Cgroup limits are best-effort in compatibility mode.
 
-Select the typed version-1 policy explicitly for a non-Fortress cell when its
-socket, `io_uring`, and ioctl requirements are known:
+For mandatory limits, use `#:strict? #t` with `make-limits-v1`. Strict mode
+requires the requested protections and aborts if they cannot be established;
+the Scheme constructor supplies the typed seccomp policy and PID-1 supervisor.
+See [a complete strict configuration](docs/guide.md#isolation-and-strict-mode).
+All containers share the host Linux kernel, so this is not a VM boundary.
 
-```scheme
-(make-container "parser" "/path/to/rootfs" '("/bin/parser")
-                #:seccomp-policy
-                (make-seccomp-policy 'native '(unix) 'deny 'restricted)
-                #:supervise? #t
-                #:teardown-timeout-ms 1000)
-```
+The [web example](docs/guide.md#serve-a-website) serves the included website on
+port 8081. It deliberately shares the host network and uses compatibility mode;
+it is not a strict configuration.
 
-The positional `(container name rootfs command)` constructor and configurations
-without `#:seccomp-policy` retain the legacy seccomp behavior for API
-compatibility. That compatibility policy is not accepted as a Fortress policy.
-
-The original four-argument `(make-limits memory pids quota period)` constructor
-also remains source-compatible and leaves `RLIMIT_NOFILE` unmanaged. New policy
-code uses `(make-limits-v1 memory pids quota period open-files-max)`. Direct C
-callers use `esquema_config_set_open_files_max`; its stable input is a `uint32_t`
-in `ESQUEMA_OPEN_FILES_MIN..ESQUEMA_OPEN_FILES_MAX`. An explicitly configured
-limit is always enforced, while omission changes no legacy non-strict launch.
-
-Landlock is defence in depth, not a complete filesystem monitor. It does not
-mediate reads and writes on files opened before restriction, and Linux does
-not currently mediate every metadata operation (for example all `chmod`,
-`chown`, `stat`, or extended-attribute cases). Esquema handles only rights
-known to the Linux UAPI headers used for the build; a higher runtime ABI does
-not justify claiming coverage for rights unknown to those headers.
-
-Fortress callers must additionally select `#:strict? #t`, provide at least one
-cgroup limit plus a version-1 open-files limit, and leave all namespaces,
-seccomp, capability dropping, and Landlock enabled. The Scheme constructor
-automatically supplies the typed Fortress seccomp policy and enables PID-1
-supervision for strict cells. Direct C callers must set the typed seccomp
-policy, supervisor, and open-files limit explicitly. Strict mode deliberately
-fails when the host has not delegated the requested cgroup controllers; it
-never silently converts a
-mandatory limit into best-effort operation. The legacy constructor and its
-best-effort cgroup behavior remain available for compatibility, but are not a
-Fortress boundary.
-
----
-
-## Tutorial: host a website with Esquema
-
-Serve a real, browser-reachable website from inside an isolated Esquema
-container — rootless, seccomp-filtered, every capability dropped. Three steps.
-
-### 1. Build a web rootfs
-
-A rootfs is just a directory. The helper populates one with a full BusyBox
-userland (its `httpd` applet is the web server) plus the standard mount points:
+## Test
 
 ```sh
-examples/build-web-rootfs.sh examples/rootfs-web
-# drop your own files in examples/rootfs-web/www/ (index.html, assets, …)
+export ESQUEMA_TEST_SHELL="$(guix build bash-static:out)/bin/bash"
+guix shell -m manifest.scm -- make check
+guix shell -m manifest.scm -- make static
+guix shell -m manifest.scm -- make sanitize
+guix shell -m manifest.scm -- make test-perf
 ```
 
-BusyBox on Guix is dynamically linked, so the container bind-mounts
-`/gnu/store` **read-only** at run time to resolve its loader and libraries — no
-copying, and the store is world-readable already. (For a fully self-contained
-image, put a statically-linked server in `bin/` instead and skip the bind.)
+`check` runs C, functional and security tests, cppcheck, and installation
+regressions with staged/custom prefixes and compiled Scheme modules. `sanitize` runs
+the C tests with ASan and UBSan; `test-perf` measures startup and checks for
+leaks. Integration tests require a host that permits the relevant namespace
+operations. Performance depends on the host and configuration; the benchmark
+reports measurements for the machine where it runs.
 
-### 2. Describe the deployment
+See the guide for [configuration and security boundaries](docs/guide.md),
+[troubleshooting](docs/guide.md#troubleshooting), and
+[Guix/Shepherd integration](docs/guide.md#guix-and-shepherd).
 
-A container is a value. `examples/deploy-web.scm`:
+## Português brasileiro
 
-```scheme
-(use-modules (esquema runtime) (esquema container))
+O **Esquema** executa programas em contêineres Linux sem exigir root, descritos
+como valores Scheme. A API em Guile usa uma biblioteca C para configurar
+namespaces, isolamento do sistema de arquivos, remoção de capabilities e
+seccomp antes de executar o programa. Não precisa de daemon. Há integração com
+Guix e Shepherd e instalação direta em distribuições Linux.
 
-(define port (or (getenv "ESQ_PORT") "8081"))
+### Requisitos e início rápido
 
-(run-container
- (make-container "esquema-web" "/absolute/path/to/examples/rootfs-web"
-                 (list "/bin/httpd" "-f" "-v" "-p" port "-h" "/www")
-                 #:hostname   "esquema-web"
-                 ;; Drop 'net to SHARE the host network so the port is reachable;
-                 ;; keep it to isolate networking (then only loopback exists).
-                 #:namespaces '(user mount pid uts ipc cgroup)
-                 #:mounts     '(("/gnu/store" "gnu/store" #t))   ; ro: busybox libs
-                 #:limits     (make-limits (* 128 1024 1024) 64 #f #f)))
-```
+Use Linux com namespaces de usuário sem privilégios e seccomp habilitados,
+Guile 3.0, compilador C compatível com GNU, GNU Make, `pkg-config`, arquivos de
+desenvolvimento do libseccomp e cabeçalhos Linux com Landlock. Os exemplos e os
+testes de integração precisam de **Bash estaticamente vinculado**. A política de
+recursos versão 1 implementa x86-64 e AArch64; os recursos do kernel e as
+permissões do sistema também precisam ser compatíveis.
 
-Everything except networking stays isolated: the payload is PID 1 in its own
-PID/mount/UTS/IPC namespace, `pivot_root`-ed into the rootfs, with an empty
-capability set and the seccomp filter loaded.
-
-### 3. Run it
+Na raiz do repositório:
 
 ```sh
-# from a checkout (library on ESQUEMA_LIBDIR):
-ESQ_PORT=8081 guix shell -m manifest.scm -- \
-  env ESQUEMA_LIBDIR=$PWD guile -L scheme examples/deploy-web.scm
-
-# or, once installed from the securityops channel (guix install esquema):
-ESQ_PORT=8081 guile examples/deploy-web.scm
+guix shell -m manifest.scm -- make smoke
+export ESQUEMA_TEST_SHELL="$(guix build bash-static:out)/bin/bash"
+guix shell -m manifest.scm -- sh examples/build-rootfs.sh examples/rootfs-min
+guix shell -m manifest.scm -- env ESQUEMA_LIBDIR="$PWD" \
+  guile -L scheme examples/hello.scm
 ```
 
-Verify and see the isolation the visitor's server runs under:
+O manifesto usa os canais Guix atuais; ele não fixa suas revisões. Registre e
+fixe também os canais para reproduzir a compilação. Em outra distribuição
+Linux, com as dependências instaladas, use `make smoke` e
+`make install PREFIX="$HOME/.local"`; o
+[guia de instalação](docs/guide.pt-BR.md#instalação) explica os caminhos do Guile
+e a preparação de pacotes.
 
-```sh
-curl -s http://localhost:8081/ | head        # your page
-# what the server process itself sees:
-guile -c '(use-modules (esquema runtime)(esquema container))
- (run-container (make-container "x" "'$PWD'/examples/rootfs-web"
-   (list "/bin/sh" "-c" "id -u; hostname; grep -E \"Cap|Seccomp\" /proc/self/status; ls /")
-   #:mounts (quote (("/gnu/store" "gnu/store" #t)))))'
-#  -> uid=0 (in-ns)  host=x  CapEff 0000000000000000  Seccomp: 2  / = just the rootfs
-```
+### Isolamento e operação
 
-### Ports below 1024
+Por padrão, `make-container` habilita os sete namespaces, seccomp, remoção de
+capabilities e uma tentativa de aplicar Landlock. A raiz permite escrita até
+que você use `#:rootfs-ro? #t`. No modo de compatibilidade, os limites de cgroup
+são aplicados quando há delegação disponível, sem garantia obrigatória.
 
-A rootless container can only bind an **unprivileged** port (≥ 1024 by default),
-so `8081` works out of the box but `80`/`81` do not. To serve on a privileged
-port, lower the threshold once (reversible), then use it:
+Para exigir os limites e as proteções, use `#:strict? #t` com `make-limits-v1`.
+Esse modo exige Landlock, controladores cgroups v2 delegados e as APIs de
+montagem necessárias; a inicialização é interrompida se os requisitos não
+puderem ser atendidos. Os contêineres compartilham o kernel Linux do host.
+BSD, macOS e Windows precisam de uma VM Linux; não há suporte nativo a esses
+kernels.
 
-```sh
-sudo sysctl -w net.ipv4.ip_unprivileged_port_start=81   # revert with =1024
-ESQ_PORT=81 guile examples/deploy-web.scm
-```
+O [tutorial do site](docs/guide.pt-BR.md#servir-um-site) usa a porta 8081 e
+compartilha a rede do host. Ele usa o modo de compatibilidade. Para validar o
+projeto, execute `guix shell -m manifest.scm -- make check` com a variável
+`ESQUEMA_TEST_SHELL` definida conforme o exemplo acima.
 
-To keep it running across reboots, wrap it in the Shepherd service (below) or a
-`guix home` Shepherd service.
+Consulte o [guia completo em português](docs/guide.pt-BR.md) para a configuração
+estrita, a API, a instalação, os testes e a solução de problemas.
 
----
+## License / Licença
 
-## Testing
+Esquema first-party source is available under either `AGPL-3.0-or-later` or a
+separate signed commercial agreement. The commercial notice does not itself
+grant proprietary-use rights and does not relicense GNU Guix, Guile, Linux,
+libseccomp, libc, or other dependencies.
 
-```sh
-guix shell -m manifest.scm -- make check       # C tests + functional + security + cppcheck
-guix shell -m manifest.scm -- make test-perf   # startup latency / overhead / leak guard
-guix shell -m manifest.scm -- make static      # gcc -fanalyzer
-guix shell -m manifest.scm -- make sanitize    # ASan + UBSan build and run
-```
+O código próprio do Esquema está disponível sob `AGPL-3.0-or-later` ou mediante
+um contrato comercial separado e assinado. O aviso comercial, por si só, não
+concede direitos de uso proprietário nem altera as licenças das dependências.
 
-The suite covers functional behaviour (`scheme/esquema/tests/functional.scm`),
-isolation and escape attempts with positive+negative controls
-(`security.scm`), C-level enforcement including the seccomp `SIGSYS` kill
-(`tests/c/test_primitives.c`), Landlock ABI/path enforcement, inherited-secret
-descriptor closure plus explicit descriptor delegation, strict cgroup abort
-and child reaping, bounded and read-back `RLIMIT_NOFILE`, attempted limit raises,
-typed seccomp architecture/socket/`io_uring`/ioctl policy,
-symlink and magiclink bind attacks, supervisor signal/timeout behavior, orphan
-reaping, 72 concurrent launches, and performance/leak guards
-(`performance.scm`).
-The C library builds warning-clean under `-Wall -Wextra -Werror` with FORTIFY,
-stack-protector/clash protection, full RELRO, a non-executable stack and
-CF-protection.
-
----
-
-## Guix service
-
-`(esquema esquema-service)` provides a Shepherd service type to supervise a
-container as part of a Guix system configuration.
-
-> Esquema empowers secure, reproducible, declarative containerization for GNU
-> Guix — for development, CI/CD and lightweight server deployments.
+See / Consulte [LICENSING.md](LICENSING.md),
+[LICENSING.pt-BR.md](LICENSING.pt-BR.md), [NOTICE](NOTICE),
+[LICENSE](LICENSE), and [LICENSE-COMMERCIAL](LICENSE-COMMERCIAL).
