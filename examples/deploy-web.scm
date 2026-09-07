@@ -14,10 +14,19 @@
 ;;; is still on. /gnu/store is bind-mounted read-only so the dynamically-linked
 ;;; busybox finds its loader + libraries.
 (use-modules (esquema runtime)
-             (esquema container))
+             (esquema container)
+             (srfi srfi-13))
 
 (define port (or (getenv "ESQ_PORT") "8081"))
-(define rootfs "/home/berkeley/esquema/examples/rootfs-web")
+(unless (and (string-every char-numeric? port)
+             (let ((number (string->number port)))
+               (and (exact-integer? number) (<= 1 number 65535))))
+  (error "ESQ_PORT must be an integer between 1 and 65535" port))
+(define rootfs
+  (canonicalize-path
+   (or (getenv "ESQ_ROOTFS")
+       (string-append (dirname (canonicalize-path (car (command-line))))
+                      "/rootfs-web"))))
 
 (define web
   (make-container "esquema-web" rootfs

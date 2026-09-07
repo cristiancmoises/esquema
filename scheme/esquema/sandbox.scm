@@ -63,32 +63,32 @@
       (when idm (esquema-config-set-id-map cfg (car idm) (cdr idm))))
     (esquema-config-set-seccomp cfg (container-seccomp? c))
     (let ((policy (container-seccomp-policy c)))
+      (define (arch-value arch)
+        (case arch
+          ((native) 0)
+          ((x86-64) 1)
+          ((aarch64) 2)
+          (else (error "esquema: unknown seccomp architecture" arch))))
+      (define (socket-bit family)
+        (case family
+          ((unix) 1)
+          ((inet) 2)
+          ((inet6) 4)
+          ((netlink) 8)
+          ((vsock) 16)
+          (else (error "esquema: unknown socket family" family))))
+      (define (io-uring-value value)
+        (case value
+          ((deny) 0)
+          ((allow) 1)
+          (else (error "esquema: unknown io_uring policy" value))))
+      (define (ioctl-value value)
+        (case value
+          ((none) 0)
+          ((restricted) 1)
+          ((legacy) 2)
+          (else (error "esquema: unknown ioctl policy" value))))
       (when policy
-        (define (arch-value arch)
-          (case arch
-            ((native) 0)
-            ((x86-64) 1)
-            ((aarch64) 2)
-            (else (error "esquema: unknown seccomp architecture" arch))))
-        (define (socket-bit family)
-          (case family
-            ((unix) 1)
-            ((inet) 2)
-            ((inet6) 4)
-            ((netlink) 8)
-            ((vsock) 16)
-            (else (error "esquema: unknown socket family" family))))
-        (define (io-uring-value value)
-          (case value
-            ((deny) 0)
-            ((allow) 1)
-            (else (error "esquema: unknown io_uring policy" value))))
-        (define (ioctl-value value)
-          (case value
-            ((none) 0)
-            ((restricted) 1)
-            ((legacy) 2)
-            (else (error "esquema: unknown ioctl policy" value))))
         (let ((sockets (fold (lambda (family mask)
                                (logior mask (socket-bit family)))
                              0

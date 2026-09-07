@@ -24,7 +24,7 @@ extern "C" {
 
 /* ---- version / health ------------------------------------------------ */
 
-#define ESQUEMA_VERSION_STRING "0.2.0"
+#define ESQUEMA_VERSION_STRING "0.3.0"
 
 /* Human-readable version string (never NULL). */
 const char *esquema_version(void);
